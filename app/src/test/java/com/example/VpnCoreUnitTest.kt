@@ -277,4 +277,98 @@ class VpnCoreUnitTest {
         // Original cached response remains untouched
         assertEquals(0x12.toByte(), response[0])
     }
+
+    @Test
+    fun appSettings_defaultsToEnglishLanguage() {
+        val defaults = com.example.data.AppSettings()
+        assertEquals(com.example.model.AppLanguage.ENGLISH, defaults.language)
+    }
+
+    @Test
+    fun uriConfigParser_parsesBase64BundleTelegramPrefixAndSubscriptionUrls() {
+        val vmessJson = """{"v":"2","ps":"VMess-Sub","add":"vm.example.com","port":443,"id":"22222222-2222-2222-2222-222222222222","aid":0,"net":"ws","host":"cdn.example.com","path":"/v","tls":"tls"}"""
+        val vmessUri = "vmess://" + android.util.Base64.encodeToString(vmessJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        val rawBundle = "Copy this -> $vmessUri\nServer2: vless://33333333-3333-3333-3333-333333333333@vl.example.com:443?security=tls&type=tcp#VLESS-Node"
+        val b64Bundle = android.util.Base64.encodeToString(rawBundle.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+
+        val parsed = UriConfigParser.parseBatch(b64Bundle)
+        assertEquals(2, parsed.size)
+        assertEquals(VpnProtocol.VMESS, parsed[0].protocol)
+        assertEquals("vm.example.com", parsed[0].host)
+        assertEquals(VpnProtocol.VLESS, parsed[1].protocol)
+        assertEquals("vl.example.com", parsed[1].host)
+
+        org.junit.Assert.assertTrue(UriConfigParser.looksLikeSubscriptionUrl("https://sub.example.com/api/v1/client/subscribe?token=abc"))
+        org.junit.Assert.assertFalse(UriConfigParser.looksLikeSubscriptionUrl("vless://111@host:443#tag"))
+        org.junit.Assert.assertFalse(UriConfigParser.looksLikeSubscriptionUrl("http://user:pass@proxy.example.com:8080#Proxy"))
+    }
+
+    @Test
+    fun subscriptionManager_parsesHeadersCorrectly() {
+        val encodedTitle = "base64:" + android.util.Base64.encodeToString("Baldr VIP".toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        assertEquals("Baldr VIP", com.example.data.SubscriptionManager.parseProfileTitle(encodedTitle))
+        assertEquals("Direct Feed", com.example.data.SubscriptionManager.parseProfileTitle("Direct Feed"))
+
+        val info = com.example.data.SubscriptionManager.parseUserInfo("upload=1024; download=4096; total=1048576; expire=1893456000")
+        assertEquals(1024L, info.uploadBytes)
+        assertEquals(4096L, info.downloadBytes)
+        assertEquals(1048576L, info.totalBytes)
+        assertEquals(1893456000L, info.expireAtSeconds)
+    }
+
+    @Test
+    fun remoteUpdateManager_evaluatesForcedAndOptionalUpdates() {
+        org.junit.Assert.assertTrue(com.example.vpn.RemoteUpdateManager.parseBooleanFlag(false, "true"))
+        org.junit.Assert.assertTrue(com.example.vpn.RemoteUpdateManager.parseBooleanFlag(false, "1"))
+        org.junit.Assert.assertFalse(com.example.vpn.RemoteUpdateManager.parseBooleanFlag(false, "false"))
+
+        val forced = com.example.vpn.RemoteUpdateManager.evaluateUpdateState(
+            forcedUpdate = true,
+            apkUrl = "https://cdn.example.com/baldr-v7.apk",
+            latestVersionCode = 0L,
+            currentVersionCode = 6L,
+            updateMessage = "Critical security update"
+        )
+        org.junit.Assert.assertTrue(forced.hasUpdate)
+        org.junit.Assert.assertTrue(forced.forced)
+        assertEquals("https://cdn.example.com/baldr-v7.apk", forced.apkUrl)
+
+        val optional = com.example.vpn.RemoteUpdateManager.evaluateUpdateState(
+            forcedUpdate = false,
+            apkUrl = "https://cdn.example.com/baldr-v7.apk",
+            latestVersionCode = 7L,
+            currentVersionCode = 6L
+        )
+        org.junit.Assert.assertTrue(optional.hasUpdate)
+        org.junit.Assert.assertFalse(optional.forced)
+
+        val alreadyLatest = com.example.vpn.RemoteUpdateManager.evaluateUpdateState(
+            forcedUpdate = true,
+            apkUrl = "https://cdn.example.com/baldr-v6.apk",
+            latestVersionCode = 6L,
+            currentVersionCode = 6L
+        )
+        org.junit.Assert.assertFalse(alreadyLatest.hasUpdate)
+        org.junit.Assert.assertFalse(alreadyLatest.forced)
+
+        val invalidUrl = com.example.vpn.RemoteUpdateManager.evaluateUpdateState(
+            forcedUpdate = true,
+            apkUrl = "not-a-valid-url",
+            latestVersionCode = 9L,
+            currentVersionCode = 6L
+        )
+        org.junit.Assert.assertFalse(invalidUrl.hasUpdate)
+    }
+
+    @Test
+    fun appAnalytics_handlesDiagnosticAndScreenEventsSafely() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        com.example.vpn.AppAnalytics.init(context, true)
+        com.example.vpn.AppAnalytics.logScreen("dashboard")
+        com.example.vpn.AppAnalytics.logVpnConnectAttempt("VLESS", "FULL_SYSTEM", "ULTRA_LOW_POWER")
+        com.example.vpn.AppAnalytics.logVpnConnected("VLESS")
+        com.example.vpn.AppAnalytics.logConfigImported("clipboard", 2)
+        com.example.vpn.AppAnalytics.logSubscriptionSynced(5)
+        com.example.vpn.AppAnalytics.sendDiagnosticTestEvent(context)
+    }
 }

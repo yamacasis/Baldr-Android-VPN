@@ -16,17 +16,83 @@ import java.net.URLEncoder
 
 object UriConfigParser {
 
+    private val KNOWN_SCHEMES = listOf(
+        "vmess://",
+        "vless://",
+        "trojan://",
+        "ss://",
+        "socks5://",
+        "socks4a://",
+        "socks4://",
+        "socks://",
+        "https://",
+        "http://",
+        "ssh://"
+    )
+
     fun parseBatch(rawText: String): List<VpnProfile> {
-        return rawText
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) return emptyList()
+
+        // 1) Support direct single raw VMess JSON object if pasted without vmess:// prefix
+        if (trimmed.startsWith("{") && trimmed.contains("\"add\"") && trimmed.contains("\"id\"")) {
+            parseRawVmessJson(trimmed)?.let { return listOf(it) }
+        }
+
+        // 2) Line-by-line URI parsing (also extracts URIs after Telegram/note prefixes)
+        val direct = parseLines(trimmed)
+        if (direct.isNotEmpty()) return direct
+
+        // 3) Support Base64-encoded multi-URI payloads (common in subscriptions & shared bundles)
+        val compact = trimmed.replace("\n", "").replace("\r", "").trim()
+        if (compact.length >= 12 && !compact.contains("://")) {
+            val decoded = decodeBase64Flexible(compact)
+            if (!decoded.isNullOrBlank() && KNOWN_SCHEMES.any { decoded.contains(it, ignoreCase = true) }) {
+                val decodedProfiles = parseLines(decoded)
+                if (decodedProfiles.isNotEmpty()) return decodedProfiles
+            }
+        }
+        return emptyList()
+    }
+
+    private fun parseLines(text: String): List<VpnProfile> {
+        return text
             .lineSequence()
-            .map { it.trim() }
+            .map { extractSchemeCandidate(it.trim()) }
             .filter { it.isNotEmpty() }
             .mapNotNull { parseSingle(it) }
             .toList()
     }
 
+    private fun extractSchemeCandidate(line: String): String {
+        if (line.isEmpty()) return ""
+        val lower = line.lowercase()
+        if (KNOWN_SCHEMES.any { lower.startsWith(it) }) return line
+        val earliestIdx = KNOWN_SCHEMES
+            .mapNotNull { scheme ->
+                val idx = lower.indexOf(scheme)
+                if (idx >= 0) idx else null
+            }
+            .minOrNull()
+        return if (earliestIdx != null) line.substring(earliestIdx).trim() else line
+    }
+
+    fun looksLikeSubscriptionUrl(rawText: String): Boolean {
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty() || trimmed.contains('\n') || trimmed.contains('\r')) return false
+        val lower = trimmed.lowercase()
+        if (!lower.startsWith("https://") && !lower.startsWith("http://")) return false
+        if (trimmed.contains("@")) return false
+        val parsed = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return false
+        val host = parsed.host.orEmpty()
+        if (host.isBlank()) return false
+        val path = parsed.path.orEmpty()
+        val hasQuery = !parsed.query.isNullOrBlank()
+        return hasQuery || (path.isNotBlank() && path != "/")
+    }
+
     fun parseSingle(rawUri: String): VpnProfile? {
-        val trimmed = rawUri.trim()
+        val trimmed = extractSchemeCandidate(rawUri.trim())
         return runCatching {
             when {
                 trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
@@ -46,21 +112,37 @@ object UriConfigParser {
     }
 
     private fun parseVmess(uri: String): VpnProfile? {
-        val encoded = uri.substringAfter("vmess://").trim()
+        val encoded = uri.substringAfter("://").substringBefore("#").trim()
         val decoded = decodeBase64Flexible(encoded) ?: return null
-        val json = JSONObject(decoded)
+        return parseRawVmessJson(decoded)
+    }
+
+    private fun parseRawVmessJson(jsonStr: String): VpnProfile? {
+        val json = runCatching { JSONObject(jsonStr) }.getOrNull() ?: return null
         val host = json.optString("add").trim()
-        val port = json.optInt("port", json.optString("port").toIntOrNull() ?: 443)
+        val rawPort = json.opt("port")
+        val port = when (rawPort) {
+            is Number -> rawPort.toInt()
+            is String -> rawPort.trim().toIntOrNull() ?: 443
+            else -> 443
+        }.coerceIn(1, 65535)
         val uuid = json.optString("id").trim()
         if (host.isEmpty() || uuid.isEmpty()) return null
         val net = json.optString("net", "tcp").lowercase()
-        val tls = json.optString("tls", "").equals("tls", ignoreCase = true)
+        val tlsRaw = json.optString("tls", "").trim().lowercase()
+        val tls = tlsRaw == "tls" || tlsRaw == "1" || tlsRaw == "true"
         val sni = json.optString("sni").ifBlank { json.optString("host") }
         val wsHost = json.optString("host")
         val wsPath = json.optString("path", "/").ifBlank { "/" }
         val ps = json.optString("ps").ifBlank { "$host:$port" }
-        val alterId = json.optInt("aid", 0)
+        val alterId = when (val rawAid = json.opt("aid")) {
+            is Number -> rawAid.toInt()
+            is String -> rawAid.trim().toIntOrNull() ?: 0
+            else -> 0
+        }
         val scy = json.optString("scy", "auto").ifBlank { "auto" }
+        val allowInsecure = json.optBoolean("allowInsecure", false) ||
+            json.optString("allowInsecure") == "1"
         return VpnProfile(
             name = ps,
             protocol = VpnProtocol.VMESS,
@@ -72,6 +154,7 @@ object UriConfigParser {
             sni = sni,
             wsHost = wsHost,
             wsPath = wsPath,
+            allowInsecure = allowInsecure,
             cipher = scy,
             alterId = alterId
         )
@@ -85,10 +168,13 @@ object UriConfigParser {
         if (host.isEmpty() || uuid.isEmpty()) return null
         val type = parsed.getQueryParameter("type")?.lowercase() ?: "tcp"
         val security = parsed.getQueryParameter("security")?.lowercase() ?: "none"
+        val tlsFlag = parsed.getQueryParameter("tls")?.lowercase()
+        val tlsEnabled = security == "tls" || security == "reality" || tlsFlag == "1" || tlsFlag == "true"
         val sni = parsed.getQueryParameter("sni").orEmpty()
         val wsHost = parsed.getQueryParameter("host").orEmpty()
         val wsPath = parsed.getQueryParameter("path")?.let { decodeUrl(it) }.orEmpty().ifBlank { "/" }
-        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1"
+        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1" ||
+            parsed.getQueryParameter("insecure") == "1"
         val name = parsed.fragment?.let { decodeUrl(it) }?.ifBlank { null } ?: "$host:$port"
         return VpnProfile(
             name = name,
@@ -97,7 +183,7 @@ object UriConfigParser {
             port = port,
             usernameOrUuid = uuid,
             transport = if (type == "ws") TransportType.WS else TransportType.TCP,
-            tlsEnabled = security == "tls" || security == "reality",
+            tlsEnabled = tlsEnabled,
             sni = sni,
             wsHost = wsHost,
             wsPath = wsPath,
@@ -115,7 +201,8 @@ object UriConfigParser {
         val sni = parsed.getQueryParameter("sni").orEmpty()
         val wsHost = parsed.getQueryParameter("host").orEmpty()
         val wsPath = parsed.getQueryParameter("path")?.let { decodeUrl(it) }.orEmpty().ifBlank { "/" }
-        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1"
+        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1" ||
+            parsed.getQueryParameter("insecure") == "1"
         val name = parsed.fragment?.let { decodeUrl(it) }?.ifBlank { null } ?: "$host:$port"
         return VpnProfile(
             name = name,
@@ -174,6 +261,11 @@ object UriConfigParser {
         val username = if (userInfo.contains(":")) decodeUrl(userInfo.substringBefore(":")) else decodeUrl(userInfo)
         val password = if (userInfo.contains(":")) decodeUrl(userInfo.substringAfter(":")) else ""
         val name = parsed.fragment?.let { decodeUrl(it) }?.ifBlank { null } ?: "${protocol.shortBadge} $host"
+        val security = parsed.getQueryParameter("security")?.lowercase()
+        val tlsParam = parsed.getQueryParameter("tls")?.lowercase()
+        val tlsEnabled = forceTls ?: (security == "tls" || tlsParam == "1" || tlsParam == "true")
+        val sni = parsed.getQueryParameter("sni").orEmpty()
+        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1"
         return VpnProfile(
             name = name,
             protocol = protocol,
@@ -181,7 +273,9 @@ object UriConfigParser {
             port = port,
             usernameOrUuid = username,
             passwordOrSecret = password,
-            tlsEnabled = forceTls ?: false
+            tlsEnabled = tlsEnabled,
+            sni = sni,
+            allowInsecure = allowInsecure
         )
     }
 
@@ -234,7 +328,13 @@ object UriConfigParser {
             }
             VpnProtocol.SSH -> {
                 val auth = if (profile.usernameOrUuid.isNotBlank()) "${encodeUrl(profile.usernameOrUuid)}@" else ""
-                "ssh://$auth${profile.host}:${profile.port}#$encodedName"
+                val query = buildList {
+                    if (profile.tlsEnabled) add("tls=1")
+                    if (profile.sni.isNotBlank()) add("sni=${encodeUrl(profile.sni)}")
+                    if (profile.allowInsecure) add("allowInsecure=1")
+                }.joinToString("&")
+                val suffix = if (query.isNotEmpty()) "?$query" else ""
+                "ssh://$auth${profile.host}:${profile.port}$suffix#$encodedName"
             }
             VpnProtocol.LOAD_BALANCE -> {
                 "netshield-lb://${profile.loadBalanceStrategy.name.lowercase()}?members=${profile.memberProfileIds}#$encodedName"
@@ -256,8 +356,9 @@ object UriConfigParser {
         }.getOrNull()
     }
 
-    private fun decodeBase64Flexible(input: String): String? {
+    fun decodeBase64Flexible(input: String): String? {
         val clean = input.trim().replace("-", "+").replace("_", "/")
+        if (clean.isEmpty()) return null
         val padded = when (clean.length % 4) {
             2 -> "$clean=="
             3 -> "$clean="

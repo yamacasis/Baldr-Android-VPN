@@ -17,6 +17,7 @@ import com.example.model.LoadBalanceStrategy
 import com.example.model.TransportType
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
+import com.example.model.VpnSubscription
 import kotlinx.coroutines.flow.Flow
 
 class VpnTypeConverters {
@@ -53,6 +54,9 @@ interface ProfileDao {
     @Query("SELECT * FROM vpn_profiles WHERE id = :id LIMIT 1")
     suspend fun getById(id: Long): VpnProfile?
 
+    @Query("SELECT * FROM vpn_profiles WHERE subscriptionId = :subscriptionId")
+    suspend fun getBySubscriptionId(subscriptionId: Long): List<VpnProfile>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(profile: VpnProfile): Long
 
@@ -70,12 +74,41 @@ interface ProfileDao {
 
     @Query("DELETE FROM vpn_profiles WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM vpn_profiles WHERE subscriptionId = :subscriptionId")
+    suspend fun deleteBySubscriptionId(subscriptionId: Long)
 }
 
-@Database(entities = [VpnProfile::class], version = 3, exportSchema = false)
+@Dao
+interface SubscriptionDao {
+    @Query("SELECT * FROM vpn_subscriptions ORDER BY lastUpdatedAt DESC, id DESC")
+    fun observeSubscriptions(): Flow<List<VpnSubscription>>
+
+    @Query("SELECT * FROM vpn_subscriptions")
+    suspend fun getAllOnce(): List<VpnSubscription>
+
+    @Query("SELECT * FROM vpn_subscriptions WHERE id = :id LIMIT 1")
+    suspend fun getById(id: Long): VpnSubscription?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(subscription: VpnSubscription): Long
+
+    @Update
+    suspend fun update(subscription: VpnSubscription)
+
+    @Query("DELETE FROM vpn_subscriptions WHERE id = :id")
+    suspend fun deleteById(id: Long)
+}
+
+@Database(
+    entities = [VpnProfile::class, VpnSubscription::class],
+    version = 4,
+    exportSchema = false
+)
 @TypeConverters(VpnTypeConverters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun profileDao(): ProfileDao
+    abstract fun subscriptionDao(): SubscriptionDao
 
     companion object {
         @Volatile
@@ -94,6 +127,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE vpn_profiles ADD COLUMN subscriptionId INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS vpn_subscriptions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        lastUpdatedAt INTEGER NOT NULL,
+                        serverCount INTEGER NOT NULL,
+                        uploadBytes INTEGER,
+                        downloadBytes INTEGER,
+                        totalBytes INTEGER,
+                        expireAtSeconds INTEGER,
+                        lastError TEXT
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -101,7 +156,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netshield_profiles.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

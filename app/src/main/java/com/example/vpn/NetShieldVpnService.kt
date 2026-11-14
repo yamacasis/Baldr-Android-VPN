@@ -203,6 +203,7 @@ class NetShieldVpnService : VpnService() {
 
         val connectedAt = System.currentTimeMillis()
         TunnelTelemetryBus.setConnectionState(ConnectionState.CONNECTED, profile)
+        AppAnalytics.logVpnConnected(profile.protocol.name)
         CrashReporter.setTunnelContext(
             protocol = profile.protocol.name,
             tunnelMode = settings.tunnelMode.name,

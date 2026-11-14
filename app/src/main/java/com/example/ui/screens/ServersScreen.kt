@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkPing
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
@@ -100,9 +101,11 @@ import com.example.model.ProtocolGroup
 import com.example.model.TransportType
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
+import com.example.model.VpnSubscription
 import com.example.model.countryCodeToFlag
 import com.example.ui.BackupImportStatus
 import com.example.ui.BenchmarkUiState
+import com.example.ui.ClipboardPasteOutcome
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.CoralError
@@ -114,12 +117,19 @@ import com.example.vpn.formatRate
 fun ServersScreen(
     strings: AppStrings,
     profiles: List<VpnProfile>,
+    subscriptions: List<VpnSubscription> = emptyList(),
     selectedProfileId: Long,
     pingingIds: Set<Long>,
+    updatingSubscriptionIds: Set<Long> = emptySet(),
     benchmarkState: BenchmarkUiState,
     onSelectProfile: (Long) -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
     onDeleteProfile: (Long) -> Unit,
+    onPasteFromClipboard: (String, (ClipboardPasteOutcome) -> Unit) -> Unit = { _, _ -> },
+    onAddOrUpdateSubscription: (Long, String, String, (Boolean, String, Int) -> Unit) -> Unit = { _, _, _, _ -> },
+    onRefreshSubscription: (VpnSubscription, (Boolean, String, Int) -> Unit) -> Unit = { _, _ -> },
+    onRefreshAllSubscriptions: ((Int, Int) -> Unit) -> Unit = { _ -> },
+    onDeleteSubscription: (Long) -> Unit = {},
     onExportConfigs: (String) -> String,
     onImportConfigsOrUris: (String, String, (BackupImportStatus) -> Unit) -> Unit,
     onBenchmarkProfile: (VpnProfile) -> Unit,
@@ -134,14 +144,50 @@ fun ServersScreen(
     var defaultNewProtocol by remember { mutableStateOf(VpnProtocol.VLESS) }
     var showEditorSheet by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var importDialogPrefill by remember { mutableStateOf("") }
+    var showSubscriptionsSheet by remember { mutableStateOf(false) }
+    var subscriptionPrefillUrl by remember { mutableStateOf("") }
     var showExportDialog by remember { mutableStateOf(false) }
     var showTestDialog by remember { mutableStateOf(false) }
     var autoConnectFastestChecked by remember { mutableStateOf(true) }
     var qrProfile by remember { mutableStateOf<VpnProfile?>(null) }
-
     val filteredProfiles = remember(profiles, selectedFilter) {
-        if (selectedFilter == null) profiles
-        else profiles.filter { it.protocol.group == selectedFilter }
+        if (selectedFilter == null) profiles else profiles.filter { it.protocol.group == selectedFilter }
+    }
+    val subscriptionNameById = remember(subscriptions) {
+        subscriptions.associate { it.id to it.name }
+    }
+
+    val handleQuickClipboardPaste = {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+        if (clip.isBlank()) {
+            Toast.makeText(context, strings.clipboardEmptyMsg, Toast.LENGTH_SHORT).show()
+        } else {
+            onPasteFromClipboard(clip) { outcome ->
+                when (outcome) {
+                    is ClipboardPasteOutcome.ImportedProfiles -> {
+                        Toast.makeText(
+                            context,
+                            strings.importedWithTypesMsg(outcome.count, outcome.protocolBadges),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    is ClipboardPasteOutcome.EncryptedBackupDetected -> {
+                        importDialogPrefill = outcome.rawText
+                        showImportDialog = true
+                    }
+                    is ClipboardPasteOutcome.SubscriptionUrlDetected -> {
+                        subscriptionPrefillUrl = outcome.url
+                        showSubscriptionsSheet = true
+                        Toast.makeText(context, strings.subscriptionUrlDetectedMsg, Toast.LENGTH_SHORT).show()
+                    }
+                    ClipboardPasteOutcome.EmptyOrInvalid -> {
+                        Toast.makeText(context, strings.clipboardNoValidConfigMsg, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
     }
 
     Scaffold(
@@ -234,11 +280,51 @@ fun ServersScreen(
                     }
                 }
 
-                // Export & Import Config Backup Action Row
+                // Primary Quick Actions: 1-Tap Clipboard Paste + Subscriptions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = handleQuickClipboardPaste,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("quick_paste_clipboard_button")
+                    ) {
+                        Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(strings.pasteClipboardQuickButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            subscriptionPrefillUrl = ""
+                            showSubscriptionsSheet = true
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("subscriptions_button")
+                    ) {
+                        Icon(Icons.Filled.RssFeed, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (subscriptions.isEmpty()) {
+                                strings.subscriptionsButton
+                            } else {
+                                strings.subscriptionsCountButton(subscriptions.size)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                // Export & Import Config Backup Action Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
@@ -258,7 +344,10 @@ fun ServersScreen(
                         Text(strings.exportConfigs, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     OutlinedButton(
-                        onClick = { showImportDialog = true },
+                        onClick = {
+                            importDialogPrefill = ""
+                            showImportDialog = true
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("import_configs_button")
@@ -369,20 +458,19 @@ fun ServersScreen(
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 OutlinedButton(
-                                    onClick = { showImportDialog = true },
-                                    modifier = Modifier.testTag("empty_import_button")
+                                    onClick = handleQuickClipboardPaste,
+                                    modifier = Modifier.testTag("empty_paste_clipboard_button")
                                 ) {
-                                    Text(strings.importFromLink)
+                                    Text(strings.pasteClipboardQuickButton)
                                 }
                                 Button(
                                     onClick = {
-                                        editingProfile = null
-                                        defaultNewProtocol = VpnProtocol.VLESS
-                                        showEditorSheet = true
+                                        subscriptionPrefillUrl = ""
+                                        showSubscriptionsSheet = true
                                     },
-                                    modifier = Modifier.testTag("empty_add_button")
+                                    modifier = Modifier.testTag("empty_subscription_button")
                                 ) {
-                                    Text(strings.addServer)
+                                    Text(strings.subscriptionsButton)
                                 }
                             }
                         }
@@ -404,6 +492,7 @@ fun ServersScreen(
                             ServerProfileCard(
                                 strings = strings,
                                 profile = profile,
+                                subscriptionName = if (profile.subscriptionId > 0L) subscriptionNameById[profile.subscriptionId] else null,
                                 isSelected = isSelected,
                                 isTesting = isTesting,
                                 onSelect = { onSelectProfile(profile.id) },
@@ -491,7 +580,11 @@ fun ServersScreen(
     if (showImportDialog) {
         ImportConfigOrUriDialog(
             strings = strings,
-            onDismiss = { showImportDialog = false },
+            initialText = importDialogPrefill,
+            onDismiss = {
+                showImportDialog = false
+                importDialogPrefill = ""
+            },
             onImport = { text, passphrase, onDone ->
                 onImportConfigsOrUris(text, passphrase) { status ->
                     when (status) {
@@ -499,11 +592,29 @@ fun ServersScreen(
                             Toast.makeText(context, strings.importedCountMsg(status.count), Toast.LENGTH_SHORT).show()
                             onDone(null)
                             showImportDialog = false
+                            importDialogPrefill = ""
                         }
                         BackupImportStatus.WrongPassword -> onDone(strings.wrongDecryptionPasswordMsg)
                         BackupImportStatus.InvalidFormat -> onDone(strings.invalidBackupFileMsg)
                     }
                 }
+            }
+        )
+    }
+
+    if (showSubscriptionsSheet) {
+        SubscriptionsBottomSheet(
+            strings = strings,
+            subscriptions = subscriptions,
+            updatingIds = updatingSubscriptionIds,
+            prefillUrl = subscriptionPrefillUrl,
+            onAddOrUpdate = onAddOrUpdateSubscription,
+            onRefresh = onRefreshSubscription,
+            onRefreshAll = onRefreshAllSubscriptions,
+            onDelete = onDeleteSubscription,
+            onDismiss = {
+                showSubscriptionsSheet = false
+                subscriptionPrefillUrl = ""
             }
         )
     }
@@ -581,6 +692,7 @@ fun ServersScreen(
 private fun ServerProfileCard(
     strings: AppStrings,
     profile: VpnProfile,
+    subscriptionName: String? = null,
     isSelected: Boolean,
     isTesting: Boolean,
     onSelect: () -> Unit,
@@ -646,6 +758,8 @@ private fun ServerProfileCard(
                         val subtitleText = if (profile.protocol == VpnProtocol.LOAD_BALANCE) {
                             val memberCount = profile.parsedMemberIds().size
                             "${strings.membersCountBadge(memberCount)} • ${profile.loadBalanceStrategy.name}"
+                        } else if (!subscriptionName.isNullOrBlank()) {
+                            "${profile.host}:${profile.port} • $subscriptionName"
                         } else {
                             "${profile.host}:${profile.port}"
                         }
@@ -931,11 +1045,12 @@ private fun ExportBackupDialog(
 @Composable
 private fun ImportConfigOrUriDialog(
     strings: AppStrings,
+    initialText: String = "",
     onDismiss: () -> Unit,
     onImport: (String, String, (String?) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
-    var text by remember { mutableStateOf("") }
+    var text by remember(initialText) { mutableStateOf(initialText) }
     var passphrase by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -1484,6 +1599,7 @@ private fun ServerEditorBottomSheet(
                                     wsHost = wsHost.trim(),
                                     allowInsecure = allowInsecure,
                                     cipher = cipher,
+                                    subscriptionId = initialProfile?.subscriptionId ?: 0L,
                                     latencyMs = initialProfile?.latencyMs,
                                     lastSpeedBps = initialProfile?.lastSpeedBps,
                                     lastCountryCode = initialProfile?.lastCountryCode

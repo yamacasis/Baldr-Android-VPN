@@ -2,10 +2,13 @@ package com.example
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +29,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -36,10 +40,13 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -48,6 +55,8 @@ import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -95,7 +104,9 @@ import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplitTunnelScreen
 import com.example.ui.theme.NetShieldTheme
+import com.example.vpn.AppAnalytics
 import com.example.vpn.CrashReporter
+import com.example.vpn.RemoteUpdateState
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -121,6 +132,8 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    val subscriptions by viewModel.subscriptions.collectAsStateWithLifecycle()
+    val updatingSubIds by viewModel.updatingSubIds.collectAsStateWithLifecycle()
     val selectedProfile by viewModel.selectedProfile.collectAsStateWithLifecycle()
     val activeProfile by viewModel.activeTunnelProfile.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -133,6 +146,9 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
     val pingingIds by viewModel.pingingIds.collectAsStateWithLifecycle()
     val benchmarkState by viewModel.benchmarkState.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val remoteUpdateState by viewModel.remoteUpdateState.collectAsStateWithLifecycle()
+    val fcmToken by viewModel.fcmToken.collectAsStateWithLifecycle()
+    val installationId by viewModel.installationId.collectAsStateWithLifecycle()
 
     val isFarsi = settings.language == AppLanguage.FARSI
     val strings = if (isFarsi) FarsiStrings else EnglishStrings
@@ -144,11 +160,22 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
         AppThemeMode.SYSTEM -> systemDark
     }
     var showSplash by rememberSaveable { mutableStateOf(true) }
+    var askedStartupNotif by rememberSaveable { mutableStateOf(false) }
+
+    val startupNotificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
 
     LaunchedEffect(Unit) {
         if (showSplash) {
             delay(950L)
             showSplash = false
+        }
+        if (!askedStartupNotif && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedStartupNotif = true
+            startupNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -219,6 +246,19 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
             val navController = rememberNavController()
             val backStackEntry by navController.currentBackStackEntryAsState()
             val currentDest = backStackEntry?.destination
+
+            LaunchedEffect(currentDest) {
+                val screenName = when {
+                    currentDest?.hasRoute(DashboardRoute::class) == true -> "dashboard"
+                    currentDest?.hasRoute(ServersRoute::class) == true -> "servers"
+                    currentDest?.hasRoute(SplitTunnelRoute::class) == true -> "traffic"
+                    currentDest?.hasRoute(SettingsRoute::class) == true -> "settings"
+                    else -> null
+                }
+                if (screenName != null) {
+                    viewModel.logScreen(screenName)
+                }
+            }
 
             val navItems = listOf(
                 NavItem(DashboardRoute, strings.navDashboard, Icons.Filled.Shield, Icons.Outlined.Shield, "nav_dashboard"),
@@ -357,12 +397,29 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                         ServersScreen(
                                             strings = strings,
                                             profiles = profiles,
+                                            subscriptions = subscriptions,
                                             selectedProfileId = selectedProfile?.id ?: -1L,
                                             pingingIds = pingingIds,
+                                            updatingSubscriptionIds = updatingSubIds,
                                             benchmarkState = benchmarkState,
                                             onSelectProfile = { id -> viewModel.selectProfile(id) },
                                             onSaveProfile = { profile -> viewModel.saveProfile(profile) },
                                             onDeleteProfile = { id -> viewModel.deleteProfile(id) },
+                                            onPasteFromClipboard = { raw, cb ->
+                                                viewModel.importFromClipboardText(raw, cb)
+                                            },
+                                            onAddOrUpdateSubscription = { existingId, name, url, cb ->
+                                                viewModel.addOrUpdateSubscription(existingId, name, url, cb)
+                                            },
+                                            onRefreshSubscription = { sub, cb ->
+                                                viewModel.refreshSubscription(sub, cb)
+                                            },
+                                            onRefreshAllSubscriptions = { cb ->
+                                                viewModel.refreshAllSubscriptions(cb)
+                                            },
+                                            onDeleteSubscription = { subId ->
+                                                viewModel.deleteSubscription(subId)
+                                            },
                                             onExportConfigs = { passphrase -> viewModel.exportConfigs(passphrase) },
                                             onImportConfigsOrUris = { raw, passphrase, cb ->
                                                 viewModel.importConfigsOrUris(raw, passphrase, cb)
@@ -402,6 +459,8 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             strings = strings,
                                             settings = settings,
                                             logs = logs,
+                                            fcmToken = fcmToken,
+                                            installationId = installationId,
                                             onSetBatteryMode = { viewModel.setBatteryMode(it) },
                                             onSetDns = { p, s -> viewModel.setDnsServers(p, s) },
                                             onSetMtu = { viewModel.setMtu(it) },
@@ -409,6 +468,14 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             onSetLanguage = { viewModel.setLanguage(it) },
                                             onSetThemeMode = { viewModel.setThemeMode(it) },
                                             onSetCrashlyticsEnabled = { viewModel.setCrashlyticsEnabled(it) },
+                                            onCheckRemoteUpdates = { onDone ->
+                                                viewModel.checkRemoteUpdateNow { state ->
+                                                    onDone(state.hasUpdate)
+                                                }
+                                            },
+                                            onTestAnalytics = { onDone ->
+                                                viewModel.testFirebaseAnalytics(onDone)
+                                            },
                                             onClearLogs = { viewModel.clearLogs() }
                                         )
                                     }
@@ -416,6 +483,34 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                             }
                         }
                     }
+                }
+
+                // Remote Config Force / Optional Update Prompt
+                if (!showSplash && remoteUpdateState.hasUpdate) {
+                    RemoteUpdatePromptDialog(
+                        state = remoteUpdateState,
+                        strings = strings,
+                        onDownloadClick = {
+                            AppAnalytics.logUpdateClicked(remoteUpdateState.forced)
+                            val opened = runCatching {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(remoteUpdateState.apkUrl)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                                true
+                            }.getOrDefault(false)
+                            if (!opened) {
+                                Toast.makeText(context, strings.updateInvalidUrlMsg, Toast.LENGTH_SHORT).show()
+                            } else if (!remoteUpdateState.forced) {
+                                viewModel.dismissOptionalUpdate()
+                            }
+                        },
+                        onDismissOptional = {
+                            if (!remoteUpdateState.forced) {
+                                viewModel.dismissOptionalUpdate()
+                            }
+                        }
+                    )
                 }
 
                 // Baldr Branded Splash Overlay
@@ -432,6 +527,63 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
             }
         }
     }
+}
+
+@Composable
+private fun RemoteUpdatePromptDialog(
+    state: RemoteUpdateState,
+    strings: com.example.ui.i18n.AppStrings,
+    onDownloadClick: () -> Unit,
+    onDismissOptional: () -> Unit
+) {
+    val bodyText = state.updateMessage.ifBlank {
+        if (state.forced) strings.updateForceDesc else strings.updateOptionalDesc
+    }
+    AlertDialog(
+        onDismissRequest = {
+            if (!state.forced) onDismissOptional()
+        },
+        properties = DialogProperties(
+            dismissOnBackPress = !state.forced,
+            dismissOnClickOutside = !state.forced
+        ),
+        icon = {
+            Icon(
+                imageVector = Icons.Filled.SystemUpdate,
+                contentDescription = null,
+                tint = if (state.forced) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = if (state.forced) strings.updateRequiredTitle else strings.updateAvailableTitle,
+                modifier = Modifier.testTag("remote_update_dialog_title")
+            )
+        },
+        text = {
+            Text(text = bodyText)
+        },
+        confirmButton = {
+            Button(
+                onClick = onDownloadClick,
+                modifier = Modifier.testTag("remote_update_download_button")
+            ) {
+                Text(strings.updateDownloadButton)
+            }
+        },
+        dismissButton = if (!state.forced) {
+            {
+                TextButton(
+                    onClick = onDismissOptional,
+                    modifier = Modifier.testTag("remote_update_later_button")
+                ) {
+                    Text(strings.updateLaterButton)
+                }
+            }
+        } else {
+            null
+        }
+    )
 }
 
 @Composable

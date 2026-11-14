@@ -111,6 +111,10 @@ dependencies {
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   implementation(libs.firebase.crashlytics)
+  implementation(libs.firebase.analytics)
+  implementation(libs.firebase.messaging)
+  implementation(libs.firebase.inappmessaging.display)
+  implementation(libs.firebase.config)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 

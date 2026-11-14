@@ -3,6 +3,7 @@ package com.example.ui
 import android.app.Application
 import android.content.Intent
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,6 +14,8 @@ import com.example.data.ExitIpChecker
 import com.example.data.InstalledAppsRepository
 import com.example.data.ProfileRepository
 import com.example.data.SettingsRepository
+import com.example.data.SubscriptionFetchResult
+import com.example.data.SubscriptionManager
 import com.example.data.UriConfigParser
 import com.example.model.AppLanguage
 import com.example.model.AppThemeMode
@@ -25,8 +28,12 @@ import com.example.model.TrafficStatsSnapshot
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
+import com.example.model.VpnSubscription
+import com.example.vpn.AppAnalytics
 import com.example.vpn.CrashReporter
 import com.example.vpn.NetShieldVpnService
+import com.example.vpn.RemoteUpdateManager
+import com.example.vpn.RemoteUpdateState
 import com.example.vpn.TunnelTelemetryBus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +41,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -49,14 +57,25 @@ sealed class BackupImportStatus {
     data object InvalidFormat : BackupImportStatus()
 }
 
+sealed class ClipboardPasteOutcome {
+    data class ImportedProfiles(val count: Int, val protocolBadges: String) : ClipboardPasteOutcome()
+    data class EncryptedBackupDetected(val rawText: String) : ClipboardPasteOutcome()
+    data class SubscriptionUrlDetected(val url: String) : ClipboardPasteOutcome()
+    data object EmptyOrInvalid : ClipboardPasteOutcome()
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getInstance(application)
-    private val profileRepo = ProfileRepository(db.profileDao())
+    private val profileRepo = ProfileRepository(db.profileDao(), db.subscriptionDao())
     private val settingsRepo = SettingsRepository(application)
     private val appsRepo = InstalledAppsRepository(application)
 
     val profiles: StateFlow<List<VpnProfile>> = profileRepo.profiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val subscriptions: StateFlow<List<VpnSubscription>> =
+        (profileRepo.subscriptions ?: flowOf(emptyList()))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val settings: StateFlow<AppSettings> = settingsRepo.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
@@ -68,6 +87,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val exitInfo: StateFlow<ExitNetworkInfo> = TunnelTelemetryBus.exitInfo
     val lastError: StateFlow<String?> = TunnelTelemetryBus.lastError
     val logs: StateFlow<List<String>> = TunnelTelemetryBus.logs
+
+    val remoteUpdateState: StateFlow<RemoteUpdateState> = RemoteUpdateManager.updateState
+    val fcmToken: StateFlow<String?> = AppAnalytics.fcmToken
+    val installationId: StateFlow<String?> = AppAnalytics.installationId
 
     val selectedProfile: StateFlow<VpnProfile?> = combine(profiles, settings) { list, prefs ->
         list.firstOrNull { it.id == prefs.activeProfileId } ?: list.firstOrNull()
@@ -82,10 +105,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pingingIds = MutableStateFlow<Set<Long>>(emptySet())
     val pingingIds: StateFlow<Set<Long>> = _pingingIds.asStateFlow()
 
+    private val _updatingSubIds = MutableStateFlow<Set<Long>>(emptySet())
+    val updatingSubIds: StateFlow<Set<Long>> = _updatingSubIds.asStateFlow()
+
     private val _benchmarkState = MutableStateFlow(BenchmarkUiState())
     val benchmarkState: StateFlow<BenchmarkUiState> = _benchmarkState.asStateFlow()
 
     private var benchmarkAllJob: Job? = null
+
+    init {
+        val app = getApplication<Application>()
+        AppAnalytics.init(app, analyticsEnabled = true)
+        viewModelScope.launch {
+            RemoteUpdateManager.refresh(app, forceFetch = false)
+        }
+    }
 
     fun loadInstalledAppsIfNeeded() {
         if (_installedApps.value.isNotEmpty() || _appsLoading.value) return
@@ -132,7 +166,154 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (firstId > 0 && settings.value.activeProfileId <= 0L) {
                 settingsRepo.setActiveProfileId(firstId)
             }
+            if (parsed.isNotEmpty()) {
+                AppAnalytics.logConfigImported("uri", parsed.size)
+            }
             onResult(parsed.size)
+        }
+    }
+
+    fun importFromClipboardText(
+        rawText: String,
+        onResult: (ClipboardPasteOutcome) -> Unit
+    ) {
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) {
+            onResult(ClipboardPasteOutcome.EmptyOrInvalid)
+            return
+        }
+        if (ConfigBackupManager.isEncryptedBackup(trimmed)) {
+            onResult(ClipboardPasteOutcome.EncryptedBackupDetected(trimmed))
+            return
+        }
+        if (UriConfigParser.looksLikeSubscriptionUrl(trimmed)) {
+            onResult(ClipboardPasteOutcome.SubscriptionUrlDetected(trimmed))
+            return
+        }
+        viewModelScope.launch {
+            val parsed = UriConfigParser.parseBatch(trimmed)
+            if (parsed.isEmpty()) {
+                onResult(ClipboardPasteOutcome.EmptyOrInvalid)
+                return@launch
+            }
+            var firstId = -1L
+            for (profile in parsed) {
+                val id = profileRepo.save(profile)
+                if (firstId < 0L) firstId = id
+            }
+            if (firstId > 0L) {
+                settingsRepo.setActiveProfileId(firstId)
+            }
+            AppAnalytics.logConfigImported("clipboard", parsed.size)
+            val summary = parsed.map { it.protocol.shortBadge }.distinct().joinToString(", ")
+            onResult(ClipboardPasteOutcome.ImportedProfiles(parsed.size, summary))
+        }
+    }
+
+    fun addOrUpdateSubscription(
+        existingId: Long = 0L,
+        name: String,
+        url: String,
+        onDone: (Boolean, String, Int) -> Unit
+    ) {
+        viewModelScope.launch {
+            val cleanUrl = url.trim()
+            val fallbackName = name.trim().ifBlank {
+                runCatching { Uri.parse(cleanUrl).host.orEmpty() }.getOrDefault("").ifBlank { "Subscription" }
+            }
+            val initialSub = if (existingId > 0L) {
+                subscriptions.value.firstOrNull { it.id == existingId }?.copy(
+                    name = fallbackName,
+                    url = cleanUrl,
+                    lastError = null
+                ) ?: VpnSubscription(id = existingId, name = fallbackName, url = cleanUrl)
+            } else {
+                VpnSubscription(name = fallbackName, url = cleanUrl)
+            }
+            val subId = profileRepo.saveSubscription(initialSub)
+            syncSubscriptionInternal(
+                sub = initialSub.copy(id = subId),
+                preferHeaderName = name.trim().isEmpty(),
+                onDone = onDone
+            )
+        }
+    }
+
+    fun refreshSubscription(
+        subscription: VpnSubscription,
+        onDone: (Boolean, String, Int) -> Unit
+    ) {
+        viewModelScope.launch {
+            syncSubscriptionInternal(subscription, preferHeaderName = false, onDone = onDone)
+        }
+    }
+
+    fun refreshAllSubscriptions(onDone: (Int, Int) -> Unit) {
+        val currentSubs = subscriptions.value
+        if (currentSubs.isEmpty()) {
+            onDone(0, 0)
+            return
+        }
+        viewModelScope.launch {
+            var successCount = 0
+            for (sub in currentSubs) {
+                var ok = false
+                syncSubscriptionInternal(sub, preferHeaderName = false) { s, _, _ -> ok = s }
+                if (ok) successCount++
+            }
+            onDone(successCount, currentSubs.size)
+        }
+    }
+
+    fun deleteSubscription(subscriptionId: Long) {
+        viewModelScope.launch {
+            profileRepo.deleteSubscription(subscriptionId)
+        }
+    }
+
+    private suspend fun syncSubscriptionInternal(
+        sub: VpnSubscription,
+        preferHeaderName: Boolean,
+        onDone: (Boolean, String, Int) -> Unit
+    ) {
+        _updatingSubIds.value = _updatingSubIds.value + sub.id
+        try {
+            when (val res = SubscriptionManager.fetchSubscription(sub.url)) {
+                is SubscriptionFetchResult.Failure -> {
+                    profileRepo.saveSubscription(sub.copy(lastError = res.message))
+                    onDone(false, res.message, 0)
+                }
+                is SubscriptionFetchResult.Success -> {
+                    val activeWasInSub = profiles.value.any {
+                        it.id == settings.value.activeProfileId && it.subscriptionId == sub.id
+                    }
+                    val insertedIds = profileRepo.replaceSubscriptionProfiles(sub.id, res.profiles)
+                    if (insertedIds.isNotEmpty() && (settings.value.activeProfileId <= 0L || activeWasInSub)) {
+                        settingsRepo.setActiveProfileId(insertedIds.first())
+                    }
+                    val resolvedName = if (preferHeaderName && !res.titleFromHeader.isNullOrBlank()) {
+                        res.titleFromHeader
+                    } else {
+                        sub.name
+                    }
+                    profileRepo.saveSubscription(
+                        sub.copy(
+                            name = resolvedName,
+                            lastUpdatedAt = System.currentTimeMillis(),
+                            serverCount = insertedIds.size,
+                            uploadBytes = res.userInfo.uploadBytes,
+                            downloadBytes = res.userInfo.downloadBytes,
+                            totalBytes = res.userInfo.totalBytes,
+                            expireAtSeconds = res.userInfo.expireAtSeconds,
+                            lastError = null
+                        )
+                    )
+                    AppAnalytics.logSubscriptionSynced(insertedIds.size)
+                    onDone(true, resolvedName, insertedIds.size)
+                }
+            }
+        } finally {
+            _updatingSubIds.value = _updatingSubIds.value - sub.id
         }
     }
 
@@ -185,7 +366,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (firstId > 0L && settings.value.activeProfileId <= 0L) {
                             settingsRepo.setActiveProfileId(firstId)
                         }
-                        onResult(BackupImportStatus.Success(singleNodes.size + lbNodes.size))
+                        val importedCount = singleNodes.size + lbNodes.size
+                        AppAnalytics.logConfigImported("backup", importedCount)
+                        onResult(BackupImportStatus.Success(importedCount))
                         return@launch
                     }
                 }
@@ -203,6 +386,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (firstId > 0L && settings.value.activeProfileId <= 0L) {
                     settingsRepo.setActiveProfileId(firstId)
                 }
+                AppAnalytics.logConfigImported("uri", parsed.size)
                 onResult(BackupImportStatus.Success(parsed.size))
             }
         }
@@ -299,6 +483,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startVpn(profile: VpnProfile) {
         viewModelScope.launch {
             settingsRepo.setActiveProfileId(profile.id)
+            val currentSettings = settings.value
+            AppAnalytics.logVpnConnectAttempt(
+                protocol = profile.protocol.name,
+                tunnelMode = currentSettings.tunnelMode.name,
+                batteryMode = currentSettings.batteryMode.name
+            )
             val ctx = getApplication<Application>()
             val intent = Intent(ctx, NetShieldVpnService::class.java).apply {
                 action = NetShieldVpnService.ACTION_CONNECT
@@ -371,6 +561,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setCrashlyticsEnabled(enabled: Boolean) {
         CrashReporter.setCollectionEnabled(getApplication(), enabled)
         viewModelScope.launch { settingsRepo.setCrashlyticsEnabled(enabled) }
+    }
+
+    fun checkRemoteUpdateNow(onResult: (RemoteUpdateState) -> Unit = {}) {
+        viewModelScope.launch {
+            val state = RemoteUpdateManager.refresh(getApplication(), forceFetch = true)
+            onResult(state)
+        }
+    }
+
+    fun dismissOptionalUpdate() {
+        RemoteUpdateManager.dismissOptionalUpdate()
+    }
+
+    fun testFirebaseAnalytics(onResult: (Boolean) -> Unit) {
+        val ok = AppAnalytics.sendDiagnosticTestEvent(getApplication())
+        onResult(ok)
+    }
+
+    fun logScreen(screenName: String) {
+        AppAnalytics.logScreen(screenName)
     }
 
     fun clearLogs() = TunnelTelemetryBus.clearLogs()

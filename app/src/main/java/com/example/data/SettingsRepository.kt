@@ -29,7 +29,7 @@ data class AppSettings(
     val killSwitchEnabled: Boolean = false,
     val autoReconnectEnabled: Boolean = false,
     val systemAlwaysOnShortcut: Boolean = false,
-    val language: AppLanguage = AppLanguage.FARSI,
+    val language: AppLanguage = AppLanguage.ENGLISH,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
     val crashlyticsEnabled: Boolean = true
 )
@@ -71,7 +71,7 @@ class SettingsRepository(private val context: Context) {
             systemAlwaysOnShortcut = prefs[Keys.SYSTEM_ALWAYS_ON_SHORTCUT] ?: false,
             language = prefs[Keys.LANGUAGE]?.let { name ->
                 AppLanguage.entries.firstOrNull { it.name == name }
-            } ?: AppLanguage.FARSI,
+            } ?: AppLanguage.ENGLISH,
             themeMode = prefs[Keys.THEME_MODE]?.let { name ->
                 AppThemeMode.entries.firstOrNull { it.name == name }
             } ?: AppThemeMode.DARK,

@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,18 +17,24 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.NetworkCheck
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -63,6 +73,8 @@ fun SettingsScreen(
     strings: AppStrings,
     settings: AppSettings,
     logs: List<String>,
+    fcmToken: String?,
+    installationId: String?,
     onSetBatteryMode: (BatteryMode) -> Unit,
     onSetDns: (String, String) -> Unit,
     onSetMtu: (Int) -> Unit,
@@ -70,6 +82,8 @@ fun SettingsScreen(
     onSetLanguage: (AppLanguage) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onSetCrashlyticsEnabled: (Boolean) -> Unit,
+    onCheckRemoteUpdates: (onDone: (Boolean) -> Unit) -> Unit,
+    onTestAnalytics: (onDone: (Boolean) -> Unit) -> Unit,
     onClearLogs: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -374,6 +388,92 @@ fun SettingsScreen(
                                 .minimumInteractiveComponentSize()
                                 .testTag("crashlytics_toggle")
                         )
+                    }
+                }
+            }
+
+            // Firebase Services & Remote Update Card
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Filled.SystemUpdate, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                        Text(strings.firebaseServicesSectionTitle, style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    Button(
+                        onClick = {
+                            onCheckRemoteUpdates { hasUpdate ->
+                                if (!hasUpdate) {
+                                    Toast.makeText(context, strings.noUpdateAvailableToast, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("check_updates_button")
+                    ) {
+                        Icon(Icons.Filled.SystemUpdate, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.checkUpdatesButton)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            onTestAnalytics { ok ->
+                                Toast.makeText(
+                                    context,
+                                    if (ok) strings.analyticsTestSentToast else strings.analyticsTestFailedToast,
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("test_analytics_button")
+                    ) {
+                        Icon(Icons.Filled.Analytics, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.testAnalyticsButton)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (installationId.isNullOrBlank() && fcmToken.isNullOrBlank()) {
+                                Toast.makeText(context, strings.firebaseIdsUnavailableToast, Toast.LENGTH_SHORT).show()
+                            } else {
+                                val payload = buildString {
+                                    if (!installationId.isNullOrBlank()) appendLine("FID: $installationId")
+                                    if (!fcmToken.isNullOrBlank()) appendLine("FCM Token: $fcmToken")
+                                }.trim()
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("Baldr Firebase IDs", payload))
+                                Toast.makeText(context, strings.firebaseIdsCopiedToast, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("copy_firebase_ids_button")
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.copyFirebaseIdsButton)
                     }
                 }
             }

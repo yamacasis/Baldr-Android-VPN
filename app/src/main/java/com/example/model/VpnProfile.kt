@@ -26,6 +26,7 @@ data class VpnProfile(
     val lastCountryCode: String? = null,
     val memberProfileIds: String = "",
     val loadBalanceStrategy: LoadBalanceStrategy = LoadBalanceStrategy.ROUND_ROBIN,
+    val subscriptionId: Long = 0L,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     fun parsedMemberIds(): List<Long> {

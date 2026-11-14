@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Baldr VPN App</string>
+    <string name="vpn_channel_name">VPN Tunnel Status</string>
+    <string name="vpn_channel_description">Shows active VPN connection, speed, and data usage</string>
+</resources>

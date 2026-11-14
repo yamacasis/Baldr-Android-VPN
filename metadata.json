@@ -1,0 +1,8 @@
+{
+  "name": "Baldr VPN App",
+  "description": "Multi-protocol Material 3 Android VPN client supporting V2Ray (VMess, VLESS, Trojan, Shadowsocks), SSH, SOCKS4/5, and HTTP Proxy with per-app split tunneling, live speeds, exit IP/country detection, and low-battery operation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

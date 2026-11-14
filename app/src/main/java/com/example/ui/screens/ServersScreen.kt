@@ -1388,7 +1388,8 @@ private fun ServerEditorBottomSheet(
                 }
 
                 if (protocol == VpnProtocol.VLESS || protocol == VpnProtocol.VMESS ||
-                    protocol == VpnProtocol.TROJAN || protocol == VpnProtocol.HTTP_PROXY
+                    protocol == VpnProtocol.TROJAN || protocol == VpnProtocol.HTTP_PROXY ||
+                    protocol == VpnProtocol.SSH
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),

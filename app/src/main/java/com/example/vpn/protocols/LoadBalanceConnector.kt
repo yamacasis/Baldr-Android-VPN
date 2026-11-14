@@ -113,6 +113,8 @@ class LoadBalanceConnector(
         return rotatedHealthy + unhealthyTail
     }
 
+    override fun isHealthy(): Boolean = nodes.any { it.healthy && it.connector.isHealthy() }
+
     override fun close() {
         nodes.forEach { runCatching { it.connector.close() } }
     }

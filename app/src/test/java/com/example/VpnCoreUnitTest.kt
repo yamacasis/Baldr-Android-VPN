@@ -224,4 +224,57 @@ class VpnCoreUnitTest {
         com.example.vpn.CrashReporter.recordError("unit_test", "sample error")
         com.example.vpn.CrashReporter.setCollectionEnabled(context, false)
     }
+
+    @Test
+    fun sshConnector_disablesCompressionAndTracksHealth() {
+        val defaults = com.example.vpn.protocols.SshConnector.createDefaultConfigMap(tlsEnabled = true)
+        assertEquals("none", defaults["compression.s2c"])
+        assertEquals("none", defaults["compression.c2s"])
+        assertEquals("true", defaults["tlsEnabled"])
+
+        val profile = com.example.model.VpnProfile(
+            name = "SSH-Test",
+            protocol = VpnProtocol.SSH,
+            host = "127.0.0.1",
+            port = 22,
+            usernameOrUuid = "user",
+            passwordOrSecret = "pass"
+        )
+        val connector = com.example.vpn.protocols.SshConnector(profile) { true }
+        org.junit.Assert.assertTrue(connector.supportsStatefulHealthCheck)
+        org.junit.Assert.assertTrue(connector.isHealthy())
+        connector.close()
+        org.junit.Assert.assertFalse(connector.isHealthy())
+    }
+
+    @Test
+    fun dnsCacheHelper_extractsKeyAndRewritesTransactionId() {
+        // Minimal standard DNS A query for example.com with TxID = 0x1234
+        val query = byteArrayOf(
+            0x12, 0x34, // TxID
+            0x01, 0x00, // Standard query
+            0x00, 0x01, // QDCOUNT = 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, 'E'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte(),
+            'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            0x03, 'C'.code.toByte(), 'O'.code.toByte(), 'M'.code.toByte(),
+            0x00,
+            0x00, 0x01, // QTYPE = A
+            0x00, 0x01  // QCLASS = IN
+        )
+        val key = com.example.vpn.tun.DnsCacheHelper.extractQuestionKey(query)
+        assertEquals("example.com|1|1", key)
+
+        val response = query.copyOf().apply {
+            this[2] = 0x81.toByte() // QR=1 (response)
+            this[3] = 0x80.toByte() // RCODE=0 (NOERROR)
+        }
+        org.junit.Assert.assertTrue(com.example.vpn.tun.DnsCacheHelper.isCacheableResponse(response))
+
+        val rewritten = com.example.vpn.tun.DnsCacheHelper.withTransactionId(response, 0xAB.toByte(), 0xCD.toByte())
+        assertEquals(0xAB.toByte(), rewritten[0])
+        assertEquals(0xCD.toByte(), rewritten[1])
+        // Original cached response remains untouched
+        assertEquals(0x12.toByte(), response[0])
+    }
 }

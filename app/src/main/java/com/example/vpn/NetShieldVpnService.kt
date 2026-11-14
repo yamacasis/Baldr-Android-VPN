@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class NetShieldVpnService : VpnService() {
@@ -55,6 +56,7 @@ class NetShieldVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val manualDisconnect = AtomicBoolean(false)
     private val networkAvailable = AtomicBoolean(true)
+    private val activeNetworks = ConcurrentHashMap.newKeySet<Network>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         serviceScope.launch {
@@ -91,7 +93,10 @@ class NetShieldVpnService : VpnService() {
         return START_STICKY
     }
 
-    private suspend fun connectTunnel(profileId: Long) {
+    private suspend fun connectTunnel(
+        profileId: Long,
+        preconnectedConnector: UpstreamConnector? = null
+    ) {
         TunnelTelemetryBus.setError(null)
         val isReconnecting = TunnelTelemetryBus.connectionState.value == ConnectionState.RECONNECTING
         if (!isReconnecting) {
@@ -106,6 +111,7 @@ class NetShieldVpnService : VpnService() {
         val targetId = if (profileId > 0) profileId else settings.activeProfileId
         val profile = profileRepo.getById(targetId)
         if (profile == null) {
+            runCatching { preconnectedConnector?.close() }
             TunnelTelemetryBus.setError("No VPN profile selected")
             TunnelTelemetryBus.setConnectionState(ConnectionState.DISCONNECTED)
             stopSelfCleanly()
@@ -125,17 +131,19 @@ class NetShieldVpnService : VpnService() {
         TunnelTelemetryBus.appendLog("Connecting via ${profile.protocol.shortBadge} -> ${profile.host}:${profile.port}")
 
         val allProfiles = profileRepo.getAllOnce()
-        val newConnector = ProtocolConnectorFactory.create(profile, allProfiles) { socket ->
+        val newConnector = preconnectedConnector ?: ProtocolConnectorFactory.create(profile, allProfiles) { socket ->
             protect(socket)
         }
-        try {
-            newConnector.connect()
-        } catch (e: Exception) {
-            newConnector.close()
-            CrashReporter.recordNonFatal("upstream_handshake_${profile.protocol.name}", e)
-            TunnelTelemetryBus.setError(e.message ?: "Upstream handshake failed")
-            handleUnexpectedDisconnect(profile, settings)
-            return
+        if (preconnectedConnector == null) {
+            try {
+                newConnector.connect()
+            } catch (e: Exception) {
+                newConnector.close()
+                CrashReporter.recordNonFatal("upstream_handshake_${profile.protocol.name}", e)
+                TunnelTelemetryBus.setError(e.message ?: "Upstream handshake failed")
+                handleUnexpectedDisconnect(profile, settings)
+                return
+            }
         }
 
         // Reuse existing Kill-Switch TUN descriptor if already locked, otherwise establish new TUN
@@ -184,7 +192,8 @@ class NetShieldVpnService : VpnService() {
                 },
                 uidResolver = { proto, srcIp, srcPort, dstIp, dstPort ->
                     resolveOwnerPackage(proto, srcIp, srcPort, dstIp, dstPort)
-                }
+                },
+                dnsSecondary = settings.dnsSecondary
             )
             sessionManager = manager
             manager.start()
@@ -306,11 +315,10 @@ class NetShieldVpnService : VpnService() {
                     val trial = ProtocolConnectorFactory.create(profile, allProfiles) { socket -> protect(socket) }
                     val connected = runCatching { trial.connect() }.isSuccess
                     if (connected) {
-                        trial.close()
-                        connectTunnel(profileId)
+                        connectTunnel(profileId, preconnectedConnector = trial)
                         break
                     } else {
-                        trial.close()
+                        runCatching { trial.close() }
                     }
                 }
                 delay(backoffMs)
@@ -322,14 +330,24 @@ class NetShieldVpnService : VpnService() {
     private fun registerNetworkObserver(profile: VpnProfile) {
         unregisterNetworkObserver()
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        activeNetworks.clear()
+        cm.activeNetwork?.let { activeNetworks.add(it) }
+        networkAvailable.set(cm.activeNetwork != null)
+
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                activeNetworks.add(network)
                 networkAvailable.set(true)
             }
 
             override fun onLost(network: Network) {
-                networkAvailable.set(false)
-                if (!manualDisconnect.get() && TunnelTelemetryBus.connectionState.value == ConnectionState.CONNECTED) {
+                activeNetworks.remove(network)
+                val stillOnline = activeNetworks.isNotEmpty() || cm.activeNetwork != null
+                networkAvailable.set(stillOnline)
+                if (!stillOnline &&
+                    !manualDisconnect.get() &&
+                    TunnelTelemetryBus.connectionState.value == ConnectionState.CONNECTED
+                ) {
                     serviceScope.launch {
                         val latest = SettingsRepository(applicationContext).settingsFlow.first()
                         if (latest.killSwitchEnabled || latest.autoReconnectEnabled) {
@@ -349,6 +367,7 @@ class NetShieldVpnService : VpnService() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         runCatching { cm.unregisterNetworkCallback(cb) }
         networkCallback = null
+        activeNetworks.clear()
     }
 
     private fun buildTunInterface(

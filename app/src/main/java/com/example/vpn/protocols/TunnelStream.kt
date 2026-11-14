@@ -47,6 +47,11 @@ class SocketTunnelStream(
 }
 
 interface UpstreamConnector : Closeable {
+    val supportsStatefulHealthCheck: Boolean
+        get() = false
+
+    fun isHealthy(): Boolean = true
+
     suspend fun connect()
     suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream
 
@@ -91,14 +96,15 @@ object ProtectedSocketFactory {
         host: String,
         port: Int,
         timeoutMs: Int = 10_000,
-        protector: (Socket) -> Boolean
+        protector: (Socket) -> Boolean,
+        soTimeoutMs: Int = 120_000
     ): Socket {
         val socket = Socket()
         protector(socket)
         socket.tcpNoDelay = true
         socket.keepAlive = true
-        socket.soTimeout = 120_000
         socket.connect(InetSocketAddress(InetAddress.getByName(host), port), timeoutMs)
+        socket.soTimeout = soTimeoutMs.coerceAtLeast(0)
         return socket
     }
 
@@ -109,9 +115,10 @@ object ProtectedSocketFactory {
         sni: String = host,
         allowInsecure: Boolean = false,
         timeoutMs: Int = 10_000,
-        protector: (Socket) -> Boolean
+        protector: (Socket) -> Boolean,
+        soTimeoutMs: Int = 120_000
     ): SSLSocket {
-        val rawSocket = openTcp(host, port, timeoutMs, protector)
+        val rawSocket = openTcp(host, port, timeoutMs, protector, soTimeoutMs = timeoutMs)
         val sslContext = if (allowInsecure) {
             val trustAll = arrayOf<TrustManager>(object : X509TrustManager {
                 override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -131,6 +138,7 @@ object ProtectedSocketFactory {
         }
         sslSocket.sslParameters = params
         sslSocket.startHandshake()
+        sslSocket.soTimeout = soTimeoutMs.coerceAtLeast(0)
         return sslSocket
     }
 

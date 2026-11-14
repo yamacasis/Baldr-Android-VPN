@@ -30,7 +30,8 @@ data class AppSettings(
     val autoReconnectEnabled: Boolean = false,
     val systemAlwaysOnShortcut: Boolean = false,
     val language: AppLanguage = AppLanguage.FARSI,
-    val themeMode: AppThemeMode = AppThemeMode.DARK
+    val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val crashlyticsEnabled: Boolean = true
 )
 
 class SettingsRepository(private val context: Context) {
@@ -48,6 +49,7 @@ class SettingsRepository(private val context: Context) {
         val SYSTEM_ALWAYS_ON_SHORTCUT = booleanPreferencesKey("system_always_on_shortcut")
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val CRASHLYTICS_ENABLED = booleanPreferencesKey("crashlytics_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -72,7 +74,8 @@ class SettingsRepository(private val context: Context) {
             } ?: AppLanguage.FARSI,
             themeMode = prefs[Keys.THEME_MODE]?.let { name ->
                 AppThemeMode.entries.firstOrNull { it.name == name }
-            } ?: AppThemeMode.DARK
+            } ?: AppThemeMode.DARK,
+            crashlyticsEnabled = prefs[Keys.CRASHLYTICS_ENABLED] ?: true
         )
     }
 
@@ -135,5 +138,9 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setThemeMode(themeMode: AppThemeMode) {
         context.dataStore.edit { it[Keys.THEME_MODE] = themeMode.name }
+    }
+
+    suspend fun setCrashlyticsEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.CRASHLYTICS_ENABLED] = enabled }
     }
 }

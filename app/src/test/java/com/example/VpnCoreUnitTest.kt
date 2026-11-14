@@ -193,4 +193,35 @@ class VpnCoreUnitTest {
         assertEquals("10,11", restored[2].memberProfileIds)
         assertEquals(com.example.model.LoadBalanceStrategy.LEAST_LATENCY, restored[2].loadBalanceStrategy)
     }
+
+    @Test
+    fun tunnelTelemetryBus_tracksAppTrafficAndClearsOnDisconnect() {
+        val sample = listOf(
+            com.example.model.AppTrafficInfo(
+                packageName = "com.example.browser",
+                bytesSent = 2048L,
+                bytesReceived = 16384L,
+                passedConnections = 4,
+                failedConnections = 1,
+                activeStreams = 1
+            )
+        )
+        com.example.vpn.TunnelTelemetryBus.updateAppTraffic(sample)
+        assertEquals(1, com.example.vpn.TunnelTelemetryBus.appTraffic.value.size)
+        assertEquals(4, com.example.vpn.TunnelTelemetryBus.appTraffic.value.first().passedConnections)
+        assertEquals(1, com.example.vpn.TunnelTelemetryBus.appTraffic.value.first().failedConnections)
+
+        com.example.vpn.TunnelTelemetryBus.setConnectionState(com.example.model.ConnectionState.DISCONNECTED)
+        assertEquals(0, com.example.vpn.TunnelTelemetryBus.appTraffic.value.size)
+    }
+
+    @Test
+    fun crashReporter_handlesCallsSafelyWithoutThrowing() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        com.example.vpn.CrashReporter.init(context, true)
+        com.example.vpn.CrashReporter.logBreadcrumb("unit_test_breadcrumb")
+        com.example.vpn.CrashReporter.setTunnelContext("VLESS", "FULL_SYSTEM", "ULTRA_LOW_POWER", "CONNECTED")
+        com.example.vpn.CrashReporter.recordError("unit_test", "sample error")
+        com.example.vpn.CrashReporter.setCollectionEnabled(context, false)
+    }
 }

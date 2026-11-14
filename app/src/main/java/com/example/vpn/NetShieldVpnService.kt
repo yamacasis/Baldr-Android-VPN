@@ -12,6 +12,7 @@ import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
@@ -39,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 class NetShieldVpnService : VpnService() {
@@ -55,6 +57,10 @@ class NetShieldVpnService : VpnService() {
     private val networkAvailable = AtomicBoolean(true)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        serviceScope.launch {
+            val prefs = runCatching { SettingsRepository(applicationContext).settingsFlow.first() }.getOrNull()
+            CrashReporter.init(applicationContext, prefs?.crashlyticsEnabled ?: true)
+        }
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 manualDisconnect.set(true)
@@ -110,6 +116,12 @@ class NetShieldVpnService : VpnService() {
             if (isReconnecting) ConnectionState.RECONNECTING else ConnectionState.CONNECTING,
             profile
         )
+        CrashReporter.setTunnelContext(
+            protocol = profile.protocol.name,
+            tunnelMode = settings.tunnelMode.name,
+            batteryMode = settings.batteryMode.name,
+            state = if (isReconnecting) "RECONNECTING" else "CONNECTING"
+        )
         TunnelTelemetryBus.appendLog("Connecting via ${profile.protocol.shortBadge} -> ${profile.host}:${profile.port}")
 
         val allProfiles = profileRepo.getAllOnce()
@@ -120,6 +132,7 @@ class NetShieldVpnService : VpnService() {
             newConnector.connect()
         } catch (e: Exception) {
             newConnector.close()
+            CrashReporter.recordNonFatal("upstream_handshake_${profile.protocol.name}", e)
             TunnelTelemetryBus.setError(e.message ?: "Upstream handshake failed")
             handleUnexpectedDisconnect(profile, settings)
             return
@@ -168,6 +181,9 @@ class NetShieldVpnService : VpnService() {
                             handleUnexpectedDisconnect(profile, latest)
                         }
                     }
+                },
+                uidResolver = { proto, srcIp, srcPort, dstIp, dstPort ->
+                    resolveOwnerPackage(proto, srcIp, srcPort, dstIp, dstPort)
                 }
             )
             sessionManager = manager
@@ -178,6 +194,12 @@ class NetShieldVpnService : VpnService() {
 
         val connectedAt = System.currentTimeMillis()
         TunnelTelemetryBus.setConnectionState(ConnectionState.CONNECTED, profile)
+        CrashReporter.setTunnelContext(
+            protocol = profile.protocol.name,
+            tunnelMode = settings.tunnelMode.name,
+            batteryMode = settings.batteryMode.name,
+            state = "CONNECTED"
+        )
         TunnelTelemetryBus.appendLog("Tunnel established (${settings.tunnelMode.name}, MTU ${settings.mtu})")
 
         startTelemetryLoop(profile, connectedAt, settings.batteryMode)
@@ -405,6 +427,7 @@ class NetShieldVpnService : VpnService() {
                     connectedSinceMillis = connectedAt,
                     activeStreams = mgr.activeStreamCount.get()
                 )
+                TunnelTelemetryBus.updateAppTraffic(mgr.snapshotAppTraffic())
 
                 notifTick++
                 if (notifTick >= notifBatchTicks) {
@@ -414,6 +437,32 @@ class NetShieldVpnService : VpnService() {
                     updateNotification(title, body)
                 }
             }
+        }
+    }
+
+    private fun resolveOwnerPackage(
+        protocol: Int,
+        srcIp: String,
+        srcPort: Int,
+        dstIp: String,
+        dstPort: Int
+    ): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        val uid = runCatching {
+            cm.getConnectionOwnerUid(
+                protocol,
+                InetSocketAddress(srcIp, srcPort),
+                InetSocketAddress(dstIp, dstPort)
+            )
+        }.getOrDefault(Process.INVALID_UID)
+        return when {
+            uid == Process.INVALID_UID -> null
+            uid == Process.myUid() -> packageName
+            uid == 0 || uid == 1000 -> "android"
+            else -> runCatching {
+                packageManager.getPackagesForUid(uid)?.firstOrNull()
+            }.getOrNull()
         }
     }
 

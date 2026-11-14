@@ -46,6 +46,16 @@ data class InstalledAppInfo(
     val isSystemApp: Boolean
 )
 
+data class AppTrafficInfo(
+    val packageName: String,
+    val bytesSent: Long = 0L,
+    val bytesReceived: Long = 0L,
+    val passedConnections: Int = 0,
+    val failedConnections: Int = 0,
+    val activeStreams: Int = 0,
+    val lastActivityMillis: Long = System.currentTimeMillis()
+)
+
 fun countryCodeToFlag(isoCode: String): String {
     val code = isoCode.trim().uppercase()
     if (code.length != 2 || !code[0].isLetter() || !code[1].isLetter()) return "\uD83C\uDF10"

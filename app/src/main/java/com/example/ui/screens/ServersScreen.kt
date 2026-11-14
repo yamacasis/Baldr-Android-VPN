@@ -6,6 +6,7 @@ import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -272,6 +273,8 @@ fun ServersScreen(
                 if (benchmarkState.isTestingAll) {
                     Surface(
                         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -587,15 +590,17 @@ private fun ServerProfileCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected)
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
             else
-                MaterialTheme.colorScheme.surface
+                MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+            contentColor = MaterialTheme.colorScheme.onSurface
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
@@ -699,7 +704,8 @@ private fun ServerProfileCard(
                 ) {
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
                             .clip(RoundedCornerShape(50))
                             .clickable(enabled = !isTesting, onClick = onBenchmark)
@@ -747,9 +753,13 @@ private fun ServerProfileCard(
                             Surface(
                                 shape = RoundedCornerShape(50),
                                 color = if (bps > 0L)
-                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f)
                                 else
-                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f),
+                                contentColor = if (bps > 0L)
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                else
+                                    MaterialTheme.colorScheme.onErrorContainer
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -1009,6 +1019,7 @@ private fun ImportConfigOrUriDialog(
                 if (isEncrypted) {
                     Surface(
                         color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1183,7 +1194,8 @@ private fun ServerEditorBottomSheet(
                             color = if (strategy == st)
                                 MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
                             else
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            contentColor = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
@@ -1224,7 +1236,8 @@ private fun ServerEditorBottomSheet(
                                 color = if (checked)
                                     MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
                                 else
-                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))

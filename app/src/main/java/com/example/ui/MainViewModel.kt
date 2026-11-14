@@ -16,6 +16,7 @@ import com.example.data.SettingsRepository
 import com.example.data.UriConfigParser
 import com.example.model.AppLanguage
 import com.example.model.AppThemeMode
+import com.example.model.AppTrafficInfo
 import com.example.model.BatteryMode
 import com.example.model.ConnectionState
 import com.example.model.ExitNetworkInfo
@@ -24,6 +25,7 @@ import com.example.model.TrafficStatsSnapshot
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
+import com.example.vpn.CrashReporter
 import com.example.vpn.NetShieldVpnService
 import com.example.vpn.TunnelTelemetryBus
 import kotlinx.coroutines.Job
@@ -62,6 +64,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val connectionState: StateFlow<ConnectionState> = TunnelTelemetryBus.connectionState
     val activeTunnelProfile: StateFlow<VpnProfile?> = TunnelTelemetryBus.activeProfile
     val trafficStats: StateFlow<TrafficStatsSnapshot> = TunnelTelemetryBus.trafficStats
+    val appTraffic: StateFlow<List<AppTrafficInfo>> = TunnelTelemetryBus.appTraffic
     val exitInfo: StateFlow<ExitNetworkInfo> = TunnelTelemetryBus.exitInfo
     val lastError: StateFlow<String?> = TunnelTelemetryBus.lastError
     val logs: StateFlow<List<String>> = TunnelTelemetryBus.logs
@@ -94,6 +97,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun getAppIcon(packageName: String): Drawable? = appsRepo.loadAppIcon(packageName)
+
+    fun getAppLabel(packageName: String): String = appsRepo.resolveAppLabel(packageName)
 
     fun selectProfile(profileId: Long) {
         viewModelScope.launch {
@@ -361,6 +366,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setThemeMode(themeMode: AppThemeMode) {
         viewModelScope.launch { settingsRepo.setThemeMode(themeMode) }
+    }
+
+    fun setCrashlyticsEnabled(enabled: Boolean) {
+        CrashReporter.setCollectionEnabled(getApplication(), enabled)
+        viewModelScope.launch { settingsRepo.setCrashlyticsEnabled(enabled) }
     }
 
     fun clearLogs() = TunnelTelemetryBus.clearLogs()

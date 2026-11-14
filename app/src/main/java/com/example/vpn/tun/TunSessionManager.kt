@@ -1,5 +1,7 @@
 package com.example.vpn.tun
 
+import android.system.OsConstants
+import com.example.model.AppTrafficInfo
 import com.example.vpn.protocols.TunnelStream
 import com.example.vpn.protocols.UpstreamConnector
 import kotlinx.coroutines.CoroutineScope
@@ -24,14 +26,25 @@ class TunSessionManager(
     private val mtu: Int,
     private val scope: CoroutineScope,
     private val onLog: (String) -> Unit,
-    private val onConnectionLost: () -> Unit = {}
+    private val onConnectionLost: () -> Unit = {},
+    private val uidResolver: ((protocol: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int) -> String?)? = null
 ) {
     val totalRxBytes = AtomicLong(0L)
     val totalTxBytes = AtomicLong(0L)
     val activeStreamCount = AtomicInteger(0)
 
+    private class MutableAppCounters {
+        val bytesSent = AtomicLong(0L)
+        val bytesReceived = AtomicLong(0L)
+        val passedConnections = AtomicInteger(0)
+        val failedConnections = AtomicInteger(0)
+        val activeStreams = AtomicInteger(0)
+        @Volatile var lastActivityMillis = System.currentTimeMillis()
+    }
+
     private val writeLock = Any()
     private val tcpSessions = ConcurrentHashMap<FlowKey, TcpFlowSession>()
+    private val appCounters = ConcurrentHashMap<String, MutableAppCounters>()
     private val running = AtomicBoolean(true)
     private val dropAllMode = AtomicBoolean(false)
     private val consecutiveFailures = AtomicInteger(0)
@@ -102,8 +115,44 @@ class TunSessionManager(
         reaperJob?.cancel()
         tcpSessions.values.forEach { it.closeSilently() }
         tcpSessions.clear()
+        appCounters.clear()
         activeStreamCount.set(0)
     }
+
+    fun snapshotAppTraffic(): List<AppTrafficInfo> {
+        return appCounters.entries
+            .map { (pkg, c) ->
+                AppTrafficInfo(
+                    packageName = pkg,
+                    bytesSent = c.bytesSent.get(),
+                    bytesReceived = c.bytesReceived.get(),
+                    passedConnections = c.passedConnections.get(),
+                    failedConnections = c.failedConnections.get(),
+                    activeStreams = c.activeStreams.get().coerceAtLeast(0),
+                    lastActivityMillis = c.lastActivityMillis
+                )
+            }
+            .sortedWith(
+                compareByDescending<AppTrafficInfo> { it.activeStreams > 0 }
+                    .thenByDescending { it.lastActivityMillis }
+            )
+    }
+
+    private fun resolveAppPackage(
+        protocol: Int,
+        srcIp: String,
+        srcPort: Int,
+        dstIp: String,
+        dstPort: Int
+    ): String {
+        val resolved = runCatching {
+            uidResolver?.invoke(protocol, srcIp, srcPort, dstIp, dstPort)
+        }.getOrNull()
+        return if (!resolved.isNullOrBlank()) resolved else "system.network"
+    }
+
+    private fun getCounter(pkg: String): MutableAppCounters =
+        appCounters.getOrPut(pkg) { MutableAppCounters() }
 
     private fun handlePacket(packet: ByteArray, length: Int) {
         val ip = PacketUtils.parseIpv4Header(packet, length) ?: return
@@ -123,11 +172,20 @@ class TunSessionManager(
         // DNS queries (UDP port 53) are relayed cleanly via DNS-over-TCP over the active tunnel
         if (udp.dstPort == 53) {
             val dnsQuery = packet.copyOfRange(payloadOffset, payloadOffset + payloadLen)
+            val appPkg = resolveAppPackage(OsConstants.IPPROTO_UDP, ip.srcIpStr, udp.srcPort, ip.dstIpStr, udp.dstPort)
+            val counter = getCounter(appPkg)
+            counter.bytesSent.addAndGet(payloadLen.toLong())
+            counter.lastActivityMillis = System.currentTimeMillis()
             totalTxBytes.addAndGet(payloadLen.toLong())
             scope.launch(Dispatchers.IO) {
                 val dnsResp = runCatching {
                     activeConnector.forwardDnsQuery(dnsQuery, dnsPrimary)
-                }.getOrNull() ?: return@launch
+                }.getOrNull()
+                if (dnsResp == null) {
+                    counter.failedConnections.incrementAndGet()
+                    counter.lastActivityMillis = System.currentTimeMillis()
+                    return@launch
+                }
 
                 if (dropAllMode.get()) return@launch
                 val respPacket = PacketUtils.buildIpv4UdpPacket(
@@ -139,6 +197,9 @@ class TunSessionManager(
                 )
                 writeToTun(respPacket)
                 totalRxBytes.addAndGet(dnsResp.size.toLong())
+                counter.bytesReceived.addAndGet(dnsResp.size.toLong())
+                counter.passedConnections.incrementAndGet()
+                counter.lastActivityMillis = System.currentTimeMillis()
             }
         }
     }
@@ -160,8 +221,10 @@ class TunSessionManager(
 
         if (isSyn && !isAck) {
             if (tcpSessions.containsKey(key)) return
+            val appPkg = resolveAppPackage(OsConstants.IPPROTO_TCP, ip.srcIpStr, tcp.srcPort, ip.dstIpStr, tcp.dstPort)
             val session = TcpFlowSession(
                 key = key,
+                appPackage = appPkg,
                 clientIp = ip.srcIp,
                 serverIp = ip.dstIp,
                 clientPort = tcp.srcPort,
@@ -207,6 +270,7 @@ class TunSessionManager(
 
     private inner class TcpFlowSession(
         private val key: FlowKey,
+        private val appPackage: String,
         private val clientIp: ByteArray,
         private val serverIp: ByteArray,
         private val clientPort: Int,
@@ -216,15 +280,19 @@ class TunSessionManager(
         @Volatile var lastActivityMillis = System.currentTimeMillis()
         @Volatile private var closed = false
         private val established = AtomicBoolean(false)
+        private val activeRecorded = AtomicBoolean(false)
         private val clientNextSeq = AtomicLong((initialClientSeq + 1L) and 0xFFFFFFFFL)
         private val serverSeq = AtomicLong(Random.nextLong(100_000L, 2_000_000_000L))
         private var upstreamStream: TunnelStream? = null
         private var upstreamJob: Job? = null
+        private val counter = getCounter(appPackage)
 
         fun startUpstream() {
             upstreamJob = scope.launch(Dispatchers.IO) {
                 val activeConnector = connector
                 if (activeConnector == null || dropAllMode.get()) {
+                    counter.failedConnections.incrementAndGet()
+                    counter.lastActivityMillis = System.currentTimeMillis()
                     sendRst()
                     closeSilently()
                     tcpSessions.remove(key)
@@ -241,6 +309,11 @@ class TunSessionManager(
                     }
                     upstreamStream = stream
                     established.set(true)
+                    if (activeRecorded.compareAndSet(false, true)) {
+                        counter.activeStreams.incrementAndGet()
+                        counter.passedConnections.incrementAndGet()
+                        counter.lastActivityMillis = System.currentTimeMillis()
+                    }
 
                     val synAckSeq = serverSeq.getAndIncrement() and 0xFFFFFFFFL
                     val synAck = PacketUtils.buildIpv4TcpPacket(
@@ -259,8 +332,11 @@ class TunSessionManager(
                         val n = stream.read(readBuf, 0, readBuf.size)
                         if (n < 0) break
                         if (n == 0) continue
-                        lastActivityMillis = System.currentTimeMillis()
+                        val now = System.currentTimeMillis()
+                        lastActivityMillis = now
+                        counter.lastActivityMillis = now
                         totalRxBytes.addAndGet(n.toLong())
+                        counter.bytesReceived.addAndGet(n.toLong())
 
                         val curSeq = serverSeq.getAndAdd(n.toLong()) and 0xFFFFFFFFL
                         val dataPkt = PacketUtils.buildIpv4TcpPacket(
@@ -283,7 +359,9 @@ class TunSessionManager(
                     }
                 } catch (e: Exception) {
                     if (!closed && !dropAllMode.get()) {
-                        onLog("TCP ${key.dstIp}:${key.dstPort} failed: ${e.message}")
+                        counter.failedConnections.incrementAndGet()
+                        counter.lastActivityMillis = System.currentTimeMillis()
+                        onLog("TCP ${key.dstIp}:${key.dstPort} failed ($appPackage): ${e.message}")
                         sendRst()
                         if (consecutiveFailures.incrementAndGet() >= 5) {
                             consecutiveFailures.set(0)
@@ -308,6 +386,8 @@ class TunSessionManager(
             }
             clientNextSeq.set((expected + data.size) and 0xFFFFFFFFL)
             totalTxBytes.addAndGet(data.size.toLong())
+            counter.bytesSent.addAndGet(data.size.toLong())
+            counter.lastActivityMillis = System.currentTimeMillis()
             sendAckOnly()
 
             scope.launch(Dispatchers.IO) {
@@ -373,7 +453,12 @@ class TunSessionManager(
         }
 
         fun closeSilently() {
-            closed = true
+            if (!closed) {
+                closed = true
+                if (activeRecorded.compareAndSet(true, false)) {
+                    counter.activeStreams.decrementAndGet()
+                }
+            }
             upstreamJob?.cancel()
             runCatching { upstreamStream?.close() }
         }

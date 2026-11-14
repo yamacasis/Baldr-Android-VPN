@@ -35,11 +35,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -95,6 +95,7 @@ import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplitTunnelScreen
 import com.example.ui.theme.NetShieldTheme
+import com.example.vpn.CrashReporter
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -124,6 +125,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
     val activeProfile by viewModel.activeTunnelProfile.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val trafficStats by viewModel.trafficStats.collectAsStateWithLifecycle()
+    val appTraffic by viewModel.appTraffic.collectAsStateWithLifecycle()
     val exitInfo by viewModel.exitInfo.collectAsStateWithLifecycle()
     val lastError by viewModel.lastError.collectAsStateWithLifecycle()
     val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
@@ -148,6 +150,10 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
             delay(950L)
             showSplash = false
         }
+    }
+
+    LaunchedEffect(settings.crashlyticsEnabled) {
+        CrashReporter.init(context.applicationContext, settings.crashlyticsEnabled)
     }
 
     val activity = context as? ComponentActivity
@@ -217,7 +223,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
             val navItems = listOf(
                 NavItem(DashboardRoute, strings.navDashboard, Icons.Filled.Shield, Icons.Outlined.Shield, "nav_dashboard"),
                 NavItem(ServersRoute, strings.navServers, Icons.Filled.Dns, Icons.Outlined.Dns, "nav_servers"),
-                NavItem(SplitTunnelRoute, strings.navSplitTunnel, Icons.Filled.SwapHoriz, Icons.Outlined.SwapHoriz, "nav_split"),
+                NavItem(SplitTunnelRoute, strings.navSplitTunnel, Icons.Filled.SwapVert, Icons.Outlined.SwapVert, "nav_split"),
                 NavItem(SettingsRoute, strings.navSettings, Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings")
             )
 
@@ -250,7 +256,8 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                         bottomBar = {
                             if (!useRail) {
                                 NavigationBar(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                    contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
                                     navItems.forEach { item ->
                                         val selected = currentDest?.hasRoute(item.route::class) == true
@@ -278,7 +285,8 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                         ) {
                             if (useRail) {
                                 NavigationRail(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                    contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
                                     navItems.forEach { item ->
                                         val selected = currentDest?.hasRoute(item.route::class) == true
@@ -378,12 +386,14 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             selectedPackages = settings.selectedPackages,
                                             installedApps = installedApps,
                                             appsLoading = appsLoading,
+                                            appTraffic = appTraffic,
                                             isConnected = connectionState == ConnectionState.CONNECTED,
                                             onLoadApps = { viewModel.loadInstalledAppsIfNeeded() },
                                             onSelectTunnelMode = { viewModel.setTunnelMode(it) },
                                             onTogglePackage = { viewModel.toggleAppPackage(it) },
                                             onSetSelectedPackages = { viewModel.setSelectedPackages(it) },
-                                            getAppIcon = { pkg -> viewModel.getAppIcon(pkg) }
+                                            getAppIcon = { pkg -> viewModel.getAppIcon(pkg) },
+                                            getAppLabel = { pkg -> viewModel.getAppLabel(pkg) }
                                         )
                                     }
 
@@ -398,6 +408,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             onSetAutoCheckIp = { viewModel.setAutoCheckExitIp(it) },
                                             onSetLanguage = { viewModel.setLanguage(it) },
                                             onSetThemeMode = { viewModel.setThemeMode(it) },
+                                            onSetCrashlyticsEnabled = { viewModel.setCrashlyticsEnabled(it) },
                                             onClearLogs = { viewModel.clearLogs() }
                                         )
                                     }

@@ -1,5 +1,6 @@
 package com.example.vpn
 
+import com.example.model.AppTrafficInfo
 import com.example.model.ConnectionState
 import com.example.model.ExitNetworkInfo
 import com.example.model.SpeedSample
@@ -29,6 +30,9 @@ object TunnelTelemetryBus {
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
+    private val _appTraffic = MutableStateFlow<List<AppTrafficInfo>>(emptyList())
+    val appTraffic: StateFlow<List<AppTrafficInfo>> = _appTraffic.asStateFlow()
+
     fun setConnectionState(state: ConnectionState, profile: VpnProfile? = _activeProfile.value) {
         _connectionState.value = state
         if (profile != null || state == ConnectionState.DISCONNECTED) {
@@ -37,7 +41,9 @@ object TunnelTelemetryBus {
         if (state == ConnectionState.DISCONNECTED) {
             _trafficStats.value = TrafficStatsSnapshot()
             _exitInfo.value = ExitNetworkInfo()
+            _appTraffic.value = emptyList()
         }
+        CrashReporter.logBreadcrumb("VPN state -> ${state.name}")
     }
 
     fun updateTraffic(
@@ -70,10 +76,15 @@ object TunnelTelemetryBus {
         _exitInfo.value = info
     }
 
+    fun updateAppTraffic(items: List<AppTrafficInfo>) {
+        _appTraffic.value = items
+    }
+
     fun setError(message: String?) {
         _lastError.value = message
         if (!message.isNullOrBlank()) {
             appendLog("ERROR: $message")
+            CrashReporter.recordError("vpn_tunnel", message)
         }
     }
 

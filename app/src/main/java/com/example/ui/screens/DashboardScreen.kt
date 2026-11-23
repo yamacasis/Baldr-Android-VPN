@@ -38,16 +38,19 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.GppGood
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AssistChip
@@ -59,6 +62,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -92,9 +96,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.AppSettings
+import com.example.data.ExitIpChecker
+import com.example.data.LatencyTier
 import com.example.model.BatteryMode
 import com.example.model.ConnectionState
 import com.example.model.ExitNetworkInfo
+import com.example.model.MultiTunnelStatus
 import com.example.model.TrafficStatsSnapshot
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
@@ -105,6 +112,7 @@ import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.BaldrGold
 import com.example.ui.theme.CoralError
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.vpn.LowBatteryState
 import com.example.vpn.formatBytes
 import com.example.vpn.formatRate
 import kotlinx.coroutines.delay
@@ -116,8 +124,10 @@ fun DashboardScreen(
     selectedProfile: VpnProfile?,
     activeProfile: VpnProfile?,
     trafficStats: TrafficStatsSnapshot,
+    multiTunnelStatus: MultiTunnelStatus = MultiTunnelStatus(),
     exitInfo: ExitNetworkInfo,
     settings: AppSettings,
+    lowBatteryState: LowBatteryState = LowBatteryState(),
     isDarkTheme: Boolean,
     lastError: String?,
     onToggleConnection: () -> Unit,
@@ -125,6 +135,7 @@ fun DashboardScreen(
     onToggleKillSwitch: (Boolean) -> Unit,
     onToggleAutoReconnect: (Boolean) -> Unit,
     onToggleSystemAlwaysOn: (Boolean) -> Unit,
+    onSwitchMultiNode: () -> Unit = {},
     onRefreshExitIp: () -> Unit,
     onNavigateToServers: () -> Unit,
     onNavigateToSplitTunnel: () -> Unit,
@@ -133,13 +144,15 @@ fun DashboardScreen(
 ) {
     val context = LocalContext.current
     val displayProfile = activeProfile ?: selectedProfile
+    val isLowBatteryActive = lowBatteryState.isLowBatteryActive
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-    LaunchedEffect(connectionState) {
+    LaunchedEffect(connectionState, isLowBatteryActive) {
         if (connectionState == ConnectionState.CONNECTED) {
+            val tickMs = if (isLowBatteryActive) 5_000L else 1_000L
             while (true) {
                 nowMillis = System.currentTimeMillis()
-                delay(1000L)
+                delay(tickMs)
             }
         }
     }
@@ -189,6 +202,46 @@ fun DashboardScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Low-Battery Operation Banner (<20%)
+            if (isLowBatteryActive) {
+                Surface(
+                    color = AmberStatus.copy(alpha = 0.16f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    border = BorderStroke(1.dp, AmberStatus.copy(alpha = 0.50f)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("low_battery_active_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                            .fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.BatterySaver,
+                            contentDescription = null,
+                            tint = AmberStatus
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = strings.lowBatteryBannerTitle(lowBatteryState.batteryPercent),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AmberStatus
+                            )
+                            Text(
+                                text = strings.lowBatteryBannerSubtitle(lowBatteryState.pausedBackgroundOperations),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
             // Firewall Lock Banner
             if (connectionState == ConnectionState.FIREWALL_LOCKED) {
                 Surface(
@@ -297,11 +350,21 @@ fun DashboardScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            val pillAccent = if (isLowBatteryActive) AmberStatus else MaterialTheme.colorScheme.primary
                             Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
-                                shape = RoundedCornerShape(50)
+                                color = if (isLowBatteryActive) {
+                                    AmberStatus.copy(alpha = 0.16f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                },
+                                contentColor = if (isLowBatteryActive) AmberStatus else MaterialTheme.colorScheme.onSurfaceVariant,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isLowBatteryActive) AmberStatus.copy(alpha = 0.45f)
+                                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                                ),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("dashboard_battery_badge")
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -309,18 +372,20 @@ fun DashboardScreen(
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Filled.BatteryChargingFull,
+                                        imageVector = if (isLowBatteryActive) Icons.Filled.BatterySaver else Icons.Filled.BatteryChargingFull,
                                         contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
+                                        tint = pillAccent,
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Text(
-                                        text = if (settings.batteryMode == BatteryMode.ULTRA_LOW_POWER)
-                                            strings.batteryLowPowerBadge
-                                        else
-                                            strings.batteryBalancedBadge,
+                                        text = when {
+                                            isLowBatteryActive -> strings.lowBatteryActiveBadge(lowBatteryState.batteryPercent)
+                                            settings.batteryMode == BatteryMode.ULTRA_LOW_POWER -> strings.batteryLowPowerBadge
+                                            else -> strings.batteryBalancedBadge
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        fontWeight = if (isLowBatteryActive) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (isLowBatteryActive) AmberStatus else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
@@ -383,7 +448,7 @@ fun DashboardScreen(
                     val connectedWave2: Float
                     val pulseScale: Float
 
-                    if (isActiveState) {
+                    if (isActiveState && !isLowBatteryActive) {
                         val infiniteTransition = rememberInfiniteTransition(label = "vpn_active_fx")
                         val pScale by infiniteTransition.animateFloat(
                             initialValue = 1f,
@@ -643,6 +708,53 @@ fun DashboardScreen(
                             }
                         }
 
+                        // Live Speed & Traffic right after the Speed Chart
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("traffic_stats_card"),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                StatTile(
+                                    label = strings.downloadSpeed,
+                                    value = formatRate(trafficStats.downloadSpeedBps),
+                                    icon = Icons.Filled.ArrowDownward,
+                                    accent = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                StatTile(
+                                    label = strings.uploadSpeed,
+                                    value = formatRate(trafficStats.uploadSpeedBps),
+                                    icon = Icons.Filled.ArrowUpward,
+                                    accent = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                StatTile(
+                                    label = strings.totalDownloaded,
+                                    value = formatBytes(trafficStats.totalDownloadedBytes),
+                                    icon = Icons.Filled.Shield,
+                                    accent = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                StatTile(
+                                    label = strings.totalUploaded,
+                                    value = formatBytes(trafficStats.totalUploadedBytes),
+                                    icon = Icons.Filled.Lock,
+                                    accent = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
                         // Active Server Selector Chip
                         Surface(
                             shape = RoundedCornerShape(16.dp),
@@ -689,16 +801,141 @@ fun DashboardScreen(
                                     }
                                 }
                                 if (displayProfile != null) {
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                        shape = RoundedCornerShape(8.dp)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Text(
-                                            text = displayProfile.protocol.shortBadge,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        val ms = displayProfile.latencyMs
+                                        if (ms != null) {
+                                            val tier = ExitIpChecker.classifyLatency(ms)
+                                            val pingColor = when (tier) {
+                                                LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primary
+                                                LatencyTier.FAIR -> AmberStatus
+                                                else -> CoralError
+                                            }
+                                            Surface(
+                                                color = pingColor.copy(alpha = 0.14f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier.testTag("dashboard_server_latency")
+                                            ) {
+                                                Text(
+                                                    text = if (ms > 0) strings.latencyMs(ms) else strings.pingTimeoutLabel,
+                                                    fontFamily = JetBrainsMonoFamily,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = pingColor,
+                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                        }
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text(
+                                                text = displayProfile.protocol.shortBadge,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Dual-VPN Active + Standby Live Control Strip (when connected via Multi-Mode)
+                        if (connectionState == ConnectionState.CONNECTED && multiTunnelStatus.isMultiMode) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.28f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.42f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dual_vpn_status_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Hub,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.tertiary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = strings.dualVpnTitle,
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (multiTunnelStatus.switchCount > 0) {
+                                                Text(
+                                                    text = "• ${strings.multiTunnelSwitchesCount(multiTunnelStatus.switchCount)}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                        if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
+                                            FilledTonalButton(
+                                                onClick = onSwitchMultiNode,
+                                                modifier = Modifier
+                                                    .minimumInteractiveComponentSize()
+                                                    .testTag("switch_multi_vpn_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.SwapHoriz,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.size(4.dp))
+                                                Text(
+                                                    text = strings.switchVpnNowButton,
+                                                    style = MaterialTheme.typography.labelMedium
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        DualVpnNodePill(
+                                            roleLabel = strings.dualVpnActiveLabel,
+                                            nodeName = multiTunnelStatus.activeNodeName.ifBlank { "-" },
+                                            badge = multiTunnelStatus.activeNodeBadge,
+                                            latencyMs = multiTunnelStatus.activeNodeLatencyMs,
+                                            statusAccent = MaterialTheme.colorScheme.primary,
+                                            statusBadgeText = "${multiTunnelStatus.healthyCount}/${multiTunnelStatus.totalCount}",
+                                            modifier = Modifier.weight(1f)
                                         )
+                                        if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
+                                            DualVpnNodePill(
+                                                roleLabel = strings.dualVpnStandbyLabel,
+                                                nodeName = multiTunnelStatus.standbyNodeName,
+                                                badge = multiTunnelStatus.standbyNodeBadge.orEmpty(),
+                                                latencyMs = multiTunnelStatus.standbyNodeLatencyMs,
+                                                statusAccent = if (multiTunnelStatus.standbyReady) MaterialTheme.colorScheme.secondary else AmberStatus,
+                                                statusBadgeText = if (multiTunnelStatus.standbyReady) strings.dualVpnReadyLabel else strings.dualVpnWarmingLabel,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -706,7 +943,7 @@ fun DashboardScreen(
                     }
                 }
 
-            // Two Home Options: Firewall (Kill Switch) & Auto-Reconnect
+            // Connection Guard: Firewall (Kill Switch), Auto-Reconnect & System Always-On VPN
             Card(
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(
@@ -725,40 +962,19 @@ fun DashboardScreen(
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.GppGood,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = strings.protectionCardTitle,
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Switch(
-                            checked = settings.systemAlwaysOnShortcut,
-                            onCheckedChange = { enabled ->
-                                onToggleSystemAlwaysOn(enabled)
-                                if (enabled) {
-                                    runCatching {
-                                        context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
-                                    }
-                                }
-                            },
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .semantics { contentDescription = strings.systemAlwaysOnVpn }
-                                .testTag("system_vpn_settings_switch")
+                        Icon(
+                            imageVector = Icons.Filled.GppGood,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = strings.protectionCardTitle,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -835,6 +1051,34 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .minimumInteractiveComponentSize()
                                 .testTag("auto_reconnect_toggle")
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
+
+                    // Clearly labeled shortcut for Android OS Always-On VPN settings
+                    OutlinedButton(
+                        onClick = {
+                            onToggleSystemAlwaysOn(true)
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .semantics { contentDescription = strings.systemAlwaysOnVpnDesc }
+                            .testTag("system_vpn_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text(
+                            text = strings.systemAlwaysOnVpn,
+                            style = MaterialTheme.typography.labelLarge
                         )
                     }
                 }
@@ -975,92 +1219,6 @@ fun DashboardScreen(
                 }
             }
 
-            // Live Speed & Cumulative Data Card
-            Card(
-                shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
-                    contentColor = MaterialTheme.colorScheme.onSurface
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("traffic_stats_card")
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Bolt,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = strings.liveSpeedTitle,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
-                        Text(
-                            text = durationText,
-                            fontFamily = JetBrainsMonoFamily,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        StatTile(
-                            label = strings.downloadSpeed,
-                            value = formatRate(trafficStats.downloadSpeedBps),
-                            icon = Icons.Filled.ArrowDownward,
-                            accent = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        StatTile(
-                            label = strings.uploadSpeed,
-                            value = formatRate(trafficStats.uploadSpeedBps),
-                            icon = Icons.Filled.ArrowUpward,
-                            accent = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        StatTile(
-                            label = strings.totalDownloaded,
-                            value = formatBytes(trafficStats.totalDownloadedBytes),
-                            icon = Icons.Filled.Shield,
-                            accent = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        StatTile(
-                            label = strings.totalUploaded,
-                            value = formatBytes(trafficStats.totalUploadedBytes),
-                            icon = Icons.Filled.Lock,
-                            accent = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
             // Quick Split Tunneling Summary Strip
             Surface(
                 shape = RoundedCornerShape(18.dp),
@@ -1159,9 +1317,89 @@ private fun StatTile(
                 text = value,
                 fontFamily = JetBrainsMonoFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 color = MaterialTheme.colorScheme.onSurface
             )
+        }
+    }
+}
+
+@Composable
+private fun DualVpnNodePill(
+    roleLabel: String,
+    nodeName: String,
+    badge: String,
+    latencyMs: Int?,
+    statusAccent: Color,
+    statusBadgeText: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.56f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.dp, statusAccent.copy(alpha = 0.35f)),
+        modifier = modifier
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(statusAccent)
+                    )
+                    Text(
+                        text = roleLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = statusAccent
+                    )
+                }
+                Text(
+                    text = statusBadgeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = nodeName,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (badge.isNotBlank()) {
+                    Text(
+                        text = badge,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (latencyMs != null && latencyMs > 0) {
+                    Text(
+                        text = "${latencyMs}ms",
+                        fontFamily = JetBrainsMonoFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusAccent
+                    )
+                }
+            }
         }
     }
 }

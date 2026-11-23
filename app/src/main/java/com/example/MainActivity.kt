@@ -106,16 +106,34 @@ import com.example.ui.screens.SplitTunnelScreen
 import com.example.ui.theme.NetShieldTheme
 import com.example.vpn.AppAnalytics
 import com.example.vpn.CrashReporter
+import com.example.vpn.RemoteUpdateManager
 import com.example.vpn.RemoteUpdateState
+import com.example.vpn.VpnShortcutController
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class MainActivity : ComponentActivity() {
+
+    private val incomingIntentState = MutableStateFlow<Intent?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        incomingIntentState.value = intent
         enableEdgeToEdge()
         setContent {
-            NetShieldApp()
+            val latestIntent by incomingIntentState.collectAsStateWithLifecycle()
+            NetShieldApp(
+                incomingIntent = latestIntent,
+                onConsumeIncomingIntent = { incomingIntentState.value = null }
+            )
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incomingIntentState.value = intent
     }
 }
 
@@ -128,7 +146,11 @@ private data class NavItem(
 )
 
 @Composable
-fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
+fun NetShieldApp(
+    viewModel: MainViewModel = viewModel(),
+    incomingIntent: Intent? = null,
+    onConsumeIncomingIntent: () -> Unit = {}
+) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
@@ -138,6 +160,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
     val activeProfile by viewModel.activeTunnelProfile.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val trafficStats by viewModel.trafficStats.collectAsStateWithLifecycle()
+    val multiTunnelStatus by viewModel.multiTunnelStatus.collectAsStateWithLifecycle()
     val appTraffic by viewModel.appTraffic.collectAsStateWithLifecycle()
     val exitInfo by viewModel.exitInfo.collectAsStateWithLifecycle()
     val lastError by viewModel.lastError.collectAsStateWithLifecycle()
@@ -145,10 +168,12 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
     val appsLoading by viewModel.appsLoading.collectAsStateWithLifecycle()
     val pingingIds by viewModel.pingingIds.collectAsStateWithLifecycle()
     val benchmarkState by viewModel.benchmarkState.collectAsStateWithLifecycle()
+    val pingAllState by viewModel.pingAllState.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
     val remoteUpdateState by viewModel.remoteUpdateState.collectAsStateWithLifecycle()
     val fcmToken by viewModel.fcmToken.collectAsStateWithLifecycle()
     val installationId by viewModel.installationId.collectAsStateWithLifecycle()
+    val lowBatteryState by viewModel.lowBatteryState.collectAsStateWithLifecycle()
 
     val isFarsi = settings.language == AppLanguage.FARSI
     val strings = if (isFarsi) FarsiStrings else EnglishStrings
@@ -238,6 +263,40 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
         } else {
             viewModel.startVpn(profile)
             pendingConnectProfile = null
+        }
+    }
+
+    LaunchedEffect(incomingIntent, profiles, selectedProfile, showSplash) {
+        val intent = incomingIntent ?: return@LaunchedEffect
+        val autoConnectLast = intent.getBooleanExtra(VpnShortcutController.EXTRA_AUTO_CONNECT_LAST, false)
+        val fcmApkUrl = intent.getStringExtra("apk_url")?.trim()
+            ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            ?: intent.getStringExtra("url")?.trim()
+                ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+        val syncRemote = intent.getStringExtra("sync_remote_config").equals("true", ignoreCase = true) ||
+            !intent.getStringExtra("forced_update").isNullOrBlank()
+
+        if (syncRemote) {
+            viewModel.checkRemoteUpdateNow()
+        }
+        if (fcmApkUrl != null) {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fcmApkUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+            }
+            onConsumeIncomingIntent()
+            return@LaunchedEffect
+        }
+        if (autoConnectLast && !showSplash) {
+            val target = selectedProfile ?: profiles.firstOrNull()
+            if (target != null) {
+                requestVpnStart(target)
+                onConsumeIncomingIntent()
+            } else if (profiles.isEmpty()) {
+                // Keep waiting briefly until Room emits initial profiles or let user add one
+                onConsumeIncomingIntent()
+            }
         }
     }
 
@@ -358,8 +417,10 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             selectedProfile = selectedProfile,
                                             activeProfile = activeProfile,
                                             trafficStats = trafficStats,
+                                            multiTunnelStatus = multiTunnelStatus,
                                             exitInfo = exitInfo,
                                             settings = settings,
+                                            lowBatteryState = lowBatteryState,
                                             isDarkTheme = isDarkTheme,
                                             lastError = lastError,
                                             onToggleConnection = {
@@ -386,6 +447,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             onToggleKillSwitch = { viewModel.setKillSwitchEnabled(it) },
                                             onToggleAutoReconnect = { viewModel.setAutoReconnectEnabled(it) },
                                             onToggleSystemAlwaysOn = { viewModel.setSystemAlwaysOnShortcut(it) },
+                                            onSwitchMultiNode = { viewModel.switchMultiVpnNode() },
                                             onRefreshExitIp = { viewModel.refreshExitIp() },
                                             onNavigateToServers = { navigateTo(ServersRoute) },
                                             onNavigateToSplitTunnel = { navigateTo(SplitTunnelRoute) },
@@ -402,6 +464,8 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             pingingIds = pingingIds,
                                             updatingSubscriptionIds = updatingSubIds,
                                             benchmarkState = benchmarkState,
+                                            pingAllState = pingAllState,
+                                            lowBatteryState = lowBatteryState,
                                             onSelectProfile = { id -> viewModel.selectProfile(id) },
                                             onSaveProfile = { profile -> viewModel.saveProfile(profile) },
                                             onDeleteProfile = { id -> viewModel.deleteProfile(id) },
@@ -424,6 +488,9 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             onImportConfigsOrUris = { raw, passphrase, cb ->
                                                 viewModel.importConfigsOrUris(raw, passphrase, cb)
                                             },
+                                            onPingProfile = { profile -> viewModel.pingProfile(profile) },
+                                            onPingAllServers = { list -> viewModel.pingAllServers(list) },
+                                            onStopPingAll = { viewModel.stopPingAll() },
                                             onBenchmarkProfile = { profile -> viewModel.benchmarkProfile(profile) },
                                             onTestAllServers = { list, autoConnect, cb ->
                                                 viewModel.testAllServers(list, autoConnect, cb)
@@ -458,10 +525,12 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                         SettingsScreen(
                                             strings = strings,
                                             settings = settings,
+                                            lowBatteryState = lowBatteryState,
                                             logs = logs,
                                             fcmToken = fcmToken,
                                             installationId = installationId,
                                             onSetBatteryMode = { viewModel.setBatteryMode(it) },
+                                            onSetLowBatteryAutoMode = { viewModel.setLowBatteryAutoModeEnabled(it) },
                                             onSetDns = { p, s -> viewModel.setDnsServers(p, s) },
                                             onSetMtu = { viewModel.setMtu(it) },
                                             onSetAutoCheckIp = { viewModel.setAutoCheckExitIp(it) },
@@ -470,7 +539,7 @@ fun NetShieldApp(viewModel: MainViewModel = viewModel()) {
                                             onSetCrashlyticsEnabled = { viewModel.setCrashlyticsEnabled(it) },
                                             onCheckRemoteUpdates = { onDone ->
                                                 viewModel.checkRemoteUpdateNow { state ->
-                                                    onDone(state.hasUpdate)
+                                                    onDone(state)
                                                 }
                                             },
                                             onTestAnalytics = { onDone ->

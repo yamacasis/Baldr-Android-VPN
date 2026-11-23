@@ -18,6 +18,7 @@ import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class AppFirebaseMessagingService : FirebaseMessagingService() {
@@ -33,6 +34,14 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
 
+        // Handle Remote Config invalidation even for silent data-only messages (without body)
+        if (shouldSyncRemoteConfig(message.data)) {
+            RemoteUpdateManager.markForceFetchPending(applicationContext)
+            scope.launch {
+                RemoteUpdateManager.refresh(applicationContext, forceFetch = true)
+            }
+        }
+
         val title = message.notification?.title
             ?: message.data["title"]
             ?: getString(R.string.app_name)
@@ -41,18 +50,13 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
             ?: message.data["message"]
             ?: return
 
-        val actionUrl = message.data["apk_url"]?.trim()
-            ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
-            ?: message.data["url"]?.trim()
-                ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
-
-        if (message.data["sync_remote_config"] == "true" || !message.data["forced_update"].isNullOrBlank()) {
-            scope.launch {
-                RemoteUpdateManager.refresh(applicationContext, forceFetch = true)
-            }
-        }
-
+        val actionUrl = resolveActionUrl(message.data)
         showNotification(title, body, actionUrl)
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
     }
 
     private fun showNotification(title: String, body: String, actionUrl: String?) {
@@ -94,7 +98,7 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
         )
 
         val notification = NotificationCompat.Builder(this, FCM_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_baldr_tile)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -108,5 +112,17 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
 
     companion object {
         const val FCM_CHANNEL_ID = "baldr_fcm_notifications"
+
+        internal fun shouldSyncRemoteConfig(data: Map<String, String>): Boolean {
+            return data["sync_remote_config"].equals("true", ignoreCase = true) ||
+                !data["forced_update"].isNullOrBlank()
+        }
+
+        internal fun resolveActionUrl(data: Map<String, String>): String? {
+            return data["apk_url"]?.trim()
+                ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+                ?: data["url"]?.trim()
+                    ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+        }
     }
 }

@@ -6,6 +6,7 @@ import com.example.model.TransportType
 import com.example.model.VpnProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -28,6 +29,8 @@ import java.security.cert.X509Certificate
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.CRC32
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -41,12 +44,53 @@ import javax.net.ssl.X509TrustManager
 
 /**
  * Transport helper supporting raw TCP, TLS, and WebSocket (ws/wss) over VpnService.protect().
+ * Shares a single OkHttp Dispatcher & ConnectionPool so concurrent streams never thrash thread pools.
  */
+@SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
 object V2RayTransport {
 
-    fun openRawStream(profile: VpnProfile, protector: (Socket) -> Boolean): TunnelStream {
+    private const val WS_PIPE_BUFFER_BYTES = 131_072
+    private const val WS_PING_NORMAL_SEC = 20L
+    private const val WS_PING_LOW_BATTERY_SEC = 45L
+
+    private val sharedBaseClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(ConnectionPool(16, 2, TimeUnit.MINUTES))
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    private val trustAllManager: X509TrustManager by lazy {
+        object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+    }
+
+    private val trustAllSslFactory by lazy {
+        SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
+        }.socketFactory
+    }
+
+    fun openRawStream(
+        profile: VpnProfile,
+        protector: (Socket) -> Boolean,
+        lowBatteryMode: Boolean = false,
+        timeoutMs: Int = 10_000,
+        retryOnTransient: Boolean = true
+    ): TunnelStream {
         return when (profile.transport) {
-            TransportType.WS -> openWebSocketStream(profile, protector)
+            TransportType.WS -> openWebSocketStream(
+                profile = profile,
+                protector = protector,
+                lowBatteryMode = lowBatteryMode,
+                timeoutMs = timeoutMs
+            )
             TransportType.TCP -> {
                 val socket = if (profile.tlsEnabled) {
                     ProtectedSocketFactory.openTls(
@@ -54,48 +98,89 @@ object V2RayTransport {
                         port = profile.port,
                         sni = profile.sni.ifBlank { profile.host },
                         allowInsecure = profile.allowInsecure,
-                        timeoutMs = 10_000,
-                        protector = protector
+                        timeoutMs = timeoutMs,
+                        protector = protector,
+                        retryOnTransient = retryOnTransient
                     )
                 } else {
-                    ProtectedSocketFactory.openTcp(profile.host, profile.port, 10_000, protector)
+                    ProtectedSocketFactory.openTcp(
+                        host = profile.host,
+                        port = profile.port,
+                        timeoutMs = timeoutMs,
+                        protector = protector,
+                        retryOnTransient = retryOnTransient
+                    )
                 }
                 SocketTunnelStream(socket)
             }
         }
     }
 
-    @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
-    private fun openWebSocketStream(profile: VpnProfile, protector: (Socket) -> Boolean): TunnelStream {
+    fun probeTransportReachable(
+        profile: VpnProfile,
+        protector: (Socket) -> Boolean,
+        timeoutMs: Int = 4_500
+    ): Boolean {
+        return runCatching {
+            val socket = if (profile.tlsEnabled) {
+                ProtectedSocketFactory.openTls(
+                    host = profile.host,
+                    port = profile.port,
+                    sni = profile.sni.ifBlank { profile.host },
+                    allowInsecure = profile.allowInsecure,
+                    timeoutMs = timeoutMs,
+                    protector = protector,
+                    soTimeoutMs = timeoutMs,
+                    retryOnTransient = false
+                )
+            } else {
+                ProtectedSocketFactory.openTcp(
+                    host = profile.host,
+                    port = profile.port,
+                    timeoutMs = timeoutMs,
+                    protector = protector,
+                    soTimeoutMs = timeoutMs,
+                    retryOnTransient = false
+                )
+            }
+            socket.close()
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun openWebSocketStream(
+        profile: VpnProfile,
+        protector: (Socket) -> Boolean,
+        lowBatteryMode: Boolean,
+        timeoutMs: Int
+    ): TunnelStream {
         val scheme = if (profile.tlsEnabled) "wss" else "ws"
         val cleanPath = if (profile.wsPath.startsWith("/")) profile.wsPath else "/${profile.wsPath}"
         val url = "$scheme://${profile.host}:${profile.port}$cleanPath"
 
-        val builder = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
+        // Derive lightweight client sharing Dispatcher & ConnectionPool (no per-stream thread leak)
+        val pingSec = if (lowBatteryMode) WS_PING_LOW_BATTERY_SEC else WS_PING_NORMAL_SEC
+        val builder = sharedBaseClient.newBuilder()
+            .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            .pingInterval(pingSec, TimeUnit.SECONDS)
             .socketFactory(object : SocketFactory() {
-                override fun createSocket(): Socket = Socket().also { protector(it) }
+                override fun createSocket(): Socket = Socket().also {
+                    protector(it)
+                    it.tcpNoDelay = true
+                    it.keepAlive = true
+                }
                 override fun createSocket(host: String, port: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host, port, 10_000, protector)
+                    ProtectedSocketFactory.openTcp(host, port, timeoutMs, protector)
                 override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host, port, 10_000, protector)
+                    ProtectedSocketFactory.openTcp(host, port, timeoutMs, protector)
                 override fun createSocket(host: InetAddress, port: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host.hostAddress ?: "", port, 10_000, protector)
+                    ProtectedSocketFactory.openTcp(host.hostAddress ?: "", port, timeoutMs, protector)
                 override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
-                    ProtectedSocketFactory.openTcp(address.hostAddress ?: "", port, 10_000, protector)
+                    ProtectedSocketFactory.openTcp(address.hostAddress ?: "", port, timeoutMs, protector)
             })
 
         if (profile.allowInsecure && profile.tlsEnabled) {
-            val trustAll = object : X509TrustManager {
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-            }
-            val ctx = SSLContext.getInstance("TLS").apply {
-                init(null, arrayOf<TrustManager>(trustAll), SecureRandom())
-            }
-            builder.sslSocketFactory(ctx.socketFactory, trustAll)
+            builder.sslSocketFactory(trustAllSslFactory, trustAllManager)
             builder.hostnameVerifier { _, _ -> true }
         }
 
@@ -106,10 +191,11 @@ object V2RayTransport {
             reqBuilder.header("Host", wsHostHeader)
         }
 
-        val pipedIn = PipedInputStream(65_536)
+        val pipedIn = PipedInputStream(WS_PIPE_BUFFER_BYTES)
         val pipedOut = PipedOutputStream(pipedIn)
         val openLatch = CountDownLatch(1)
-        var openError: Throwable? = null
+        val openError = AtomicReference<Throwable?>(null)
+        val closedFlag = AtomicBoolean(false)
 
         val ws = client.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -117,6 +203,7 @@ object V2RayTransport {
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (closedFlag.get()) return
                 runCatching {
                     pipedOut.write(bytes.toByteArray())
                     pipedOut.flush()
@@ -124,23 +211,31 @@ object V2RayTransport {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                closedFlag.set(true)
                 runCatching { pipedOut.close() }
                 webSocket.close(1000, null)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                openError = t
+                closedFlag.set(true)
+                openError.set(t)
                 openLatch.countDown()
                 runCatching { pipedOut.close() }
             }
         })
 
-        if (!openLatch.await(10, TimeUnit.SECONDS)) {
+        if (!openLatch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)) {
+            closedFlag.set(true)
             ws.cancel()
+            runCatching { pipedIn.close() }
+            runCatching { pipedOut.close() }
             throw IOException("WebSocket handshake timeout")
         }
-        openError?.let {
+        openError.get()?.let {
+            closedFlag.set(true)
             ws.cancel()
+            runCatching { pipedIn.close() }
+            runCatching { pipedOut.close() }
             throw IOException("WebSocket failed: ${it.message}", it)
         }
 
@@ -149,7 +244,7 @@ object V2RayTransport {
                 pipedIn.read(buffer, offset, length)
 
             override fun write(data: ByteArray, offset: Int, length: Int) {
-                if (!ws.send(data.toByteString(offset, length))) {
+                if (closedFlag.get() || !ws.send(data.toByteString(offset, length))) {
                     throw IOException("WebSocket write failed")
                 }
             }
@@ -157,10 +252,11 @@ object V2RayTransport {
             override fun inputStream(): InputStream = pipedIn
 
             override fun close() {
-                runCatching { ws.close(1000, "closed") }
-                runCatching { pipedIn.close() }
-                runCatching { pipedOut.close() }
-                client.dispatcher.executorService.shutdown()
+                if (closedFlag.compareAndSet(false, true)) {
+                    runCatching { ws.close(1000, "closed") }
+                    runCatching { pipedIn.close() }
+                    runCatching { pipedOut.close() }
+                }
             }
         }
     }
@@ -174,6 +270,8 @@ class VlessConnector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    private val lowBatteryMode = AtomicBoolean(false)
+
     private val uuidBytes: ByteArray by lazy {
         val uuid = UUID.fromString(profile.usernameOrUuid.trim())
         ByteBuffer.allocate(16)
@@ -182,16 +280,24 @@ class VlessConnector(
             .array()
     }
 
+    override fun setLowBatteryMode(enabled: Boolean) {
+        lowBatteryMode.set(enabled)
+    }
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        V2RayTransport.probeTransportReachable(profile, protector)
+    }
+
     override suspend fun connect() = withContext(Dispatchers.IO) {
         // Validate UUID format and transport reachability
         uuidBytes
-        val probe = V2RayTransport.openRawStream(profile, protector)
+        val probe = V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get())
         probe.close()
     }
 
     override suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream =
         withContext(Dispatchers.IO) {
-            val raw = V2RayTransport.openRawStream(profile, protector)
+            val raw = V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get())
             try {
                 val out = ByteArrayOutputStream()
                 out.write(0x00) // Version 0
@@ -260,21 +366,31 @@ class TrojanConnector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    private val lowBatteryMode = AtomicBoolean(false)
+
     private val hashedPasswordHex: ByteArray by lazy {
         val digest = MessageDigest.getInstance("SHA-224")
             .digest(profile.passwordOrSecret.toByteArray(Charsets.UTF_8))
         digest.joinToString("") { "%02x".format(it) }.toByteArray(Charsets.US_ASCII)
     }
 
+    override fun setLowBatteryMode(enabled: Boolean) {
+        lowBatteryMode.set(enabled)
+    }
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        V2RayTransport.probeTransportReachable(profile.copy(tlsEnabled = true), protector)
+    }
+
     override suspend fun connect() = withContext(Dispatchers.IO) {
         val tlsProfile = profile.copy(tlsEnabled = true)
-        V2RayTransport.openRawStream(tlsProfile, protector).close()
+        V2RayTransport.openRawStream(tlsProfile, protector, lowBatteryMode.get()).close()
     }
 
     override suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream =
         withContext(Dispatchers.IO) {
             val tlsProfile = profile.copy(tlsEnabled = true)
-            val raw = V2RayTransport.openRawStream(tlsProfile, protector)
+            val raw = V2RayTransport.openRawStream(tlsProfile, protector, lowBatteryMode.get())
             try {
                 val out = ByteArrayOutputStream()
                 out.write(hashedPasswordHex)
@@ -309,6 +425,20 @@ class ShadowsocksConnector(
     private val isChaCha = cipherMode.contains("chacha20")
     private val masterKey: ByteArray by lazy {
         evpBytesToKey(profile.passwordOrSecret.toByteArray(Charsets.UTF_8), keySize)
+    }
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            ProtectedSocketFactory.openTcp(
+                host = profile.host,
+                port = profile.port,
+                timeoutMs = 4_500,
+                protector = protector,
+                soTimeoutMs = 4_500,
+                retryOnTransient = false
+            ).close()
+            true
+        }.getOrDefault(false)
     }
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
@@ -486,6 +616,8 @@ class VmessConnector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    private val lowBatteryMode = AtomicBoolean(false)
+
     private val uuidBytes: ByteArray by lazy {
         val uuid = UUID.fromString(profile.usernameOrUuid.trim())
         ByteBuffer.allocate(16)
@@ -501,14 +633,22 @@ class VmessConnector(
         md5.digest()
     }
 
+    override fun setLowBatteryMode(enabled: Boolean) {
+        lowBatteryMode.set(enabled)
+    }
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        V2RayTransport.probeTransportReachable(profile, protector)
+    }
+
     override suspend fun connect() = withContext(Dispatchers.IO) {
         uuidBytes
-        V2RayTransport.openRawStream(profile, protector).close()
+        V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get()).close()
     }
 
     override suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream =
         withContext(Dispatchers.IO) {
-            val raw = V2RayTransport.openRawStream(profile, protector)
+            val raw = V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get())
             try {
                 val rnd = SecureRandom()
                 val reqIv = ByteArray(16).also { rnd.nextBytes(it) }

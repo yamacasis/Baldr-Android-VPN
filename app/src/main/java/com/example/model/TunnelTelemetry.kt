@@ -56,6 +56,21 @@ data class AppTrafficInfo(
     val lastActivityMillis: Long = System.currentTimeMillis()
 )
 
+data class MultiTunnelStatus(
+    val isMultiMode: Boolean = false,
+    val strategyName: String = "",
+    val activeNodeName: String = "",
+    val activeNodeBadge: String = "",
+    val activeNodeLatencyMs: Int? = null,
+    val standbyNodeName: String? = null,
+    val standbyNodeBadge: String? = null,
+    val standbyNodeLatencyMs: Int? = null,
+    val standbyReady: Boolean = false,
+    val healthyCount: Int = 0,
+    val totalCount: Int = 0,
+    val switchCount: Int = 0
+)
+
 fun countryCodeToFlag(isoCode: String): String {
     val code = isoCode.trim().uppercase()
     if (code.length != 2 || !code[0].isLetter() || !code[1].isLetter()) return "\uD83C\uDF10"

@@ -31,11 +31,14 @@ class TunSessionManager(
     private val onLog: (String) -> Unit,
     private val onConnectionLost: () -> Unit = {},
     private val uidResolver: ((protocol: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int) -> String?)? = null,
-    private val dnsSecondary: String = "8.8.8.8"
+    private val dnsSecondary: String = "8.8.8.8",
+    private val isDeviceInteractiveProvider: () -> Boolean = { true },
+    private val onPausedCountChanged: (Int) -> Unit = {}
 ) {
     val totalRxBytes = AtomicLong(0L)
     val totalTxBytes = AtomicLong(0L)
     val activeStreamCount = AtomicInteger(0)
+    val pausedBackgroundCount = AtomicInteger(0)
 
     private class MutableAppCounters {
         val bytesSent = AtomicLong(0L)
@@ -58,8 +61,10 @@ class TunSessionManager(
     private val dnsSemaphore = Semaphore(MAX_CONCURRENT_DNS)
     private val running = AtomicBoolean(true)
     private val dropAllMode = AtomicBoolean(false)
+    private val lowBatteryMode = AtomicBoolean(false)
     private val connectionLostNotified = AtomicBoolean(false)
     private val consecutiveFailures = AtomicInteger(0)
+    private val lastFailureMillis = AtomicLong(0L)
     private val maxTcpPayload = (mtu - 40).coerceIn(512, 1440)
 
     private var readerJob: Job? = null
@@ -86,21 +91,24 @@ class TunSessionManager(
             }
         }
 
-        // Low-battery idle session reaper: sleeps 30s and preserves long-lived sockets for 5 minutes
+        // Adaptive idle session reaper: 30s normally (5m idle), 45s idle / 15s half-closed in Low-Battery mode
         reaperJob = scope.launch(Dispatchers.IO) {
             while (isActive && running.get()) {
-                delay(30_000L)
+                val lowBat = lowBatteryMode.get()
+                delay(if (lowBat) LOW_BATTERY_REAPER_INTERVAL_MS else NORMAL_REAPER_INTERVAL_MS)
                 val now = System.currentTimeMillis()
                 if (dnsCache.size > MAX_DNS_CACHE_ENTRIES) {
                     dnsCache.entries.removeIf { now - it.value.cachedAtMillis > DNS_CACHE_TTL_MS }
                 }
                 if (tcpSessions.isEmpty()) continue
+                val activeTimeout = if (lowBatteryMode.get()) LOW_BATTERY_ACTIVE_IDLE_TIMEOUT_MS else ACTIVE_IDLE_TIMEOUT_MS
+                val halfClosedTimeout = if (lowBatteryMode.get()) LOW_BATTERY_HALF_CLOSED_TIMEOUT_MS else HALF_CLOSED_IDLE_TIMEOUT_MS
                 val expired = tcpSessions.entries.filter { entry ->
                     val idleMs = now - entry.value.lastActivityMillis
                     if (entry.value.isHalfClosedByClient()) {
-                        idleMs > HALF_CLOSED_IDLE_TIMEOUT_MS
+                        idleMs > halfClosedTimeout
                     } else {
-                        idleMs > ACTIVE_IDLE_TIMEOUT_MS
+                        idleMs > activeTimeout
                     }
                 }
                 for (entry in expired) {
@@ -110,6 +118,39 @@ class TunSessionManager(
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Switches Low-Battery Operation mode dynamically: pauses high-resource background TCP traffic
+     * when screen is off or concurrent streams exceed the low-power cap, and prunes idle sockets faster.
+     */
+    fun setLowBatteryMode(enabled: Boolean) {
+        val prev = lowBatteryMode.getAndSet(enabled)
+        if (prev == enabled) return
+        if (enabled) {
+            val now = System.currentTimeMillis()
+            var pruned = 0
+            for (entry in tcpSessions.entries.toList()) {
+                val idleMs = now - entry.value.lastActivityMillis
+                if (idleMs > LOW_BATTERY_ACTIVE_IDLE_TIMEOUT_MS ||
+                    (!isDeviceInteractiveProvider() && entry.value.totalFlowBytes() >= HIGH_RESOURCE_BG_FLOW_BYTES)
+                ) {
+                    entry.value.closeSilently()
+                    if (tcpSessions.remove(entry.key) != null) {
+                        pruned++
+                    }
+                }
+            }
+            activeStreamCount.set(tcpSessions.size)
+            if (pruned > 0) {
+                val totalPaused = pausedBackgroundCount.addAndGet(pruned)
+                onPausedCountChanged(totalPaused)
+                onLog("Low-Battery Mode: paused $pruned idle/background stream(s)")
+            }
+        } else {
+            pausedBackgroundCount.set(0)
+            onPausedCountChanged(0)
         }
     }
 
@@ -289,7 +330,26 @@ class TunSessionManager(
 
         if (isSyn && !isAck) {
             if (tcpSessions.containsKey(key)) return
-            val appPkg = resolveAppPackage(OsConstants.IPPROTO_TCP, ip.srcIpStr, tcp.srcPort, ip.dstIpStr, tcp.dstPort)
+            if (lowBatteryMode.get() && shouldPauseNewBackgroundStream(tcp.dstPort)) {
+                val count = pausedBackgroundCount.incrementAndGet()
+                onPausedCountChanged(count)
+                val rst = PacketUtils.buildIpv4TcpPacket(
+                    srcIp = ip.dstIp,
+                    dstIp = ip.srcIp,
+                    srcPort = tcp.dstPort,
+                    dstPort = tcp.srcPort,
+                    seqNum = 0L,
+                    ackNum = (tcp.seqNum + 1L) and 0xFFFFFFFFL,
+                    flags = PacketUtils.TCP_RST or PacketUtils.TCP_ACK
+                )
+                writeToTun(rst)
+                return
+            }
+            val appPkg = if (lowBatteryMode.get()) {
+                "low.battery.saver"
+            } else {
+                resolveAppPackage(OsConstants.IPPROTO_TCP, ip.srcIpStr, tcp.srcPort, ip.dstIpStr, tcp.dstPort)
+            }
             val session = TcpFlowSession(
                 key = key,
                 appPackage = appPkg,
@@ -318,6 +378,15 @@ class TunSessionManager(
         if (isFin) {
             session.onClientFin(tcp.seqNum + payloadLen)
         }
+    }
+
+    private fun shouldPauseNewBackgroundStream(dstPort: Int): Boolean {
+        // Always keep DNS-over-TCP (port 53) unblocked
+        if (dstPort == 53) return false
+        // Pause new background TCP bursts while device screen is off in Low-Battery mode
+        if (!isDeviceInteractiveProvider()) return true
+        // Cap concurrent streams while Low-Battery mode is active to prevent background saturation
+        return tcpSessions.size >= LOW_BATTERY_MAX_CONCURRENT_STREAMS
     }
 
     private fun writeToTun(packet: ByteArray) {
@@ -350,6 +419,7 @@ class TunSessionManager(
         private val established = AtomicBoolean(false)
         private val clientFinReceived = AtomicBoolean(false)
         private val activeRecorded = AtomicBoolean(false)
+        private val flowBytes = AtomicLong(0L)
         private val clientNextSeq = AtomicLong((initialClientSeq + 1L) and 0xFFFFFFFFL)
         private val serverSeq = AtomicLong(Random.nextLong(100_000L, 2_000_000_000L))
         private val sendQueue = Channel<ByteArray>(capacity = SEND_QUEUE_CAPACITY)
@@ -359,6 +429,8 @@ class TunSessionManager(
         private val counter = getCounter(appPackage)
 
         fun isHalfClosedByClient(): Boolean = clientFinReceived.get()
+
+        fun totalFlowBytes(): Long = flowBytes.get()
 
         fun startUpstream() {
             upstreamJob = scope.launch(Dispatchers.IO) {
@@ -374,7 +446,20 @@ class TunSessionManager(
                 }
 
                 try {
-                    val stream = activeConnector.openTcpStream(key.dstIp, key.dstPort)
+                    val stream = try {
+                        activeConnector.openTcpStream(key.dstIp, key.dstPort)
+                    } catch (firstErr: Exception) {
+                        if (closed || dropAllMode.get() || !running.get()) {
+                            throw firstErr
+                        }
+                        // Retry once after brief backoff to survive mobile radio / NAT micro-blips
+                        delay(UPSTREAM_RETRY_BACKOFF_MS)
+                        val latestConnector = connector ?: throw firstErr
+                        if (closed || dropAllMode.get() || !running.get()) {
+                            throw firstErr
+                        }
+                        latestConnector.openTcpStream(key.dstIp, key.dstPort)
+                    }
                     consecutiveFailures.set(0)
                     if (closed || dropAllMode.get()) {
                         stream.close()
@@ -427,8 +512,20 @@ class TunSessionManager(
                         val now = System.currentTimeMillis()
                         lastActivityMillis = now
                         counter.lastActivityMillis = now
+                        val transferred = flowBytes.addAndGet(n.toLong())
                         totalRxBytes.addAndGet(n.toLong())
                         counter.bytesReceived.addAndGet(n.toLong())
+
+                        // Pause sustained high-resource background transfers while screen is off in Low-Battery mode
+                        if (lowBatteryMode.get() &&
+                            !isDeviceInteractiveProvider() &&
+                            transferred >= HIGH_RESOURCE_BG_FLOW_BYTES
+                        ) {
+                            val totalPaused = pausedBackgroundCount.incrementAndGet()
+                            onPausedCountChanged(totalPaused)
+                            sendRst()
+                            break
+                        }
 
                         val curSeq = serverSeq.getAndAdd(n.toLong()) and 0xFFFFFFFFL
                         val dataPkt = PacketUtils.buildIpv4TcpPacket(
@@ -457,10 +554,18 @@ class TunSessionManager(
                         sendRst()
 
                         if (!established.get()) {
+                            val now = System.currentTimeMillis()
+                            val prevFailAt = lastFailureMillis.getAndSet(now)
+                            val failCount = if (now - prevFailAt > FAILURE_WINDOW_RESET_MS) {
+                                consecutiveFailures.set(1)
+                                1
+                            } else {
+                                consecutiveFailures.incrementAndGet()
+                            }
                             val connectorLost = if (activeConnector.supportsStatefulHealthCheck) {
                                 !activeConnector.isHealthy()
                             } else {
-                                consecutiveFailures.incrementAndGet() >= STATELESS_FAILURE_THRESHOLD
+                                failCount >= STATELESS_FAILURE_THRESHOLD
                             }
                             if (connectorLost && connectionLostNotified.compareAndSet(false, true)) {
                                 consecutiveFailures.set(0)
@@ -485,6 +590,7 @@ class TunSessionManager(
                 return
             }
             clientNextSeq.set((expected + data.size) and 0xFFFFFFFFL)
+            flowBytes.addAndGet(data.size.toLong())
             totalTxBytes.addAndGet(data.size.toLong())
             counter.bytesSent.addAndGet(data.size.toLong())
             counter.lastActivityMillis = System.currentTimeMillis()
@@ -565,11 +671,19 @@ class TunSessionManager(
     companion object {
         private const val ACTIVE_IDLE_TIMEOUT_MS = 300_000L
         private const val HALF_CLOSED_IDLE_TIMEOUT_MS = 45_000L
+        private const val LOW_BATTERY_ACTIVE_IDLE_TIMEOUT_MS = 45_000L
+        private const val LOW_BATTERY_HALF_CLOSED_TIMEOUT_MS = 15_000L
+        private const val NORMAL_REAPER_INTERVAL_MS = 30_000L
+        private const val LOW_BATTERY_REAPER_INTERVAL_MS = 60_000L
+        private const val LOW_BATTERY_MAX_CONCURRENT_STREAMS = 10
+        private const val HIGH_RESOURCE_BG_FLOW_BYTES = 512L * 1024L
         private const val DNS_CACHE_TTL_MS = 60_000L
         private const val MAX_DNS_CACHE_ENTRIES = 256
         private const val MAX_CONCURRENT_DNS = 6
         private const val SEND_QUEUE_CAPACITY = 1024
-        private const val STATELESS_FAILURE_THRESHOLD = 10
+        private const val STATELESS_FAILURE_THRESHOLD = 5
+        private const val UPSTREAM_RETRY_BACKOFF_MS = 250L
+        private const val FAILURE_WINDOW_RESET_MS = 30_000L
     }
 }
 

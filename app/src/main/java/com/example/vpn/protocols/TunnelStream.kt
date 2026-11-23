@@ -8,11 +8,15 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.ConnectException
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -51,6 +55,13 @@ interface UpstreamConnector : Closeable {
         get() = false
 
     fun isHealthy(): Boolean = true
+
+    /**
+     * Performs an active lightweight reachability/liveness check against the upstream tunnel.
+     */
+    suspend fun probeHealth(): Boolean = isHealthy()
+
+    fun setLowBatteryMode(enabled: Boolean) {}
 
     suspend fun connect()
     suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream
@@ -92,20 +103,89 @@ fun readExact(input: InputStream, count: Int): ByteArray {
 
 object ProtectedSocketFactory {
 
+    private data class CachedHost(
+        val address: InetAddress,
+        val cachedAtMillis: Long
+    )
+
+    private const val DNS_CACHE_TTL_MS = 10 * 60 * 1000L
+    private const val MAX_DNS_CACHE_SIZE = 128
+    private const val SOCKET_BUFFER_BYTES = 65_536
+    private const val TRANSIENT_RETRY_DELAY_MS = 200L
+
+    private val hostCache = ConcurrentHashMap<String, CachedHost>()
+
+    internal fun clearHostCache() {
+        hostCache.clear()
+    }
+
+    internal fun seedHostCacheForTest(host: String, address: InetAddress, cachedAtMillis: Long = System.currentTimeMillis()) {
+        hostCache[host.trim().lowercase()] = CachedHost(address, cachedAtMillis)
+    }
+
+    /**
+     * Resolves host preferring IPv4 and falls back to the last known good IP (up to 10 minutes)
+     * during transient mobile DNS blips or Wi-Fi/cellular handoffs.
+     */
+    internal fun resolveWithFallback(host: String): InetAddress {
+        val cleanHost = host.trim()
+        val cacheKey = cleanHost.lowercase()
+        val now = System.currentTimeMillis()
+        if (isIpLiteral(cleanHost)) {
+            return InetAddress.getByName(cleanHost)
+        }
+        return try {
+            val all = InetAddress.getAllByName(cleanHost)
+            val chosen = all.firstOrNull { it is Inet4Address } ?: all.first()
+            if (hostCache.size >= MAX_DNS_CACHE_SIZE) {
+                hostCache.entries.removeIf { now - it.value.cachedAtMillis > DNS_CACHE_TTL_MS }
+            }
+            hostCache[cacheKey] = CachedHost(chosen, now)
+            chosen
+        } catch (err: Exception) {
+            val cached = hostCache[cacheKey]
+            if (cached != null && now - cached.cachedAtMillis <= DNS_CACHE_TTL_MS) {
+                cached.address
+            } else {
+                throw err
+            }
+        }
+    }
+
     fun openTcp(
         host: String,
         port: Int,
         timeoutMs: Int = 10_000,
         protector: (Socket) -> Boolean,
-        soTimeoutMs: Int = 120_000
+        soTimeoutMs: Int = 120_000,
+        retryOnTransient: Boolean = true
     ): Socket {
-        val socket = Socket()
-        protector(socket)
-        socket.tcpNoDelay = true
-        socket.keepAlive = true
-        socket.connect(InetSocketAddress(InetAddress.getByName(host), port), timeoutMs)
-        socket.soTimeout = soTimeoutMs.coerceAtLeast(0)
-        return socket
+        val attempts = if (retryOnTransient) 2 else 1
+        var lastError: Exception? = null
+        for (attempt in 1..attempts) {
+            val socket = Socket()
+            try {
+                protector(socket)
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
+                runCatching { socket.sendBufferSize = SOCKET_BUFFER_BYTES }
+                runCatching { socket.receiveBufferSize = SOCKET_BUFFER_BYTES }
+                val targetAddr = resolveWithFallback(host)
+                socket.connect(InetSocketAddress(targetAddr, port), timeoutMs)
+                socket.soTimeout = soTimeoutMs.coerceAtLeast(0)
+                return socket
+            } catch (e: Exception) {
+                runCatching { socket.close() }
+                lastError = e
+                val transient = e is SocketTimeoutException || e is ConnectException
+                if (attempt < attempts && transient) {
+                    runCatching { Thread.sleep(TRANSIENT_RETRY_DELAY_MS) }
+                    continue
+                }
+                throw e
+            }
+        }
+        throw lastError ?: IOException("Unable to connect to $host:$port")
     }
 
     @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
@@ -116,30 +196,43 @@ object ProtectedSocketFactory {
         allowInsecure: Boolean = false,
         timeoutMs: Int = 10_000,
         protector: (Socket) -> Boolean,
-        soTimeoutMs: Int = 120_000
+        soTimeoutMs: Int = 120_000,
+        retryOnTransient: Boolean = true
     ): SSLSocket {
-        val rawSocket = openTcp(host, port, timeoutMs, protector, soTimeoutMs = timeoutMs)
-        val sslContext = if (allowInsecure) {
-            val trustAll = arrayOf<TrustManager>(object : X509TrustManager {
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-            })
-            SSLContext.getInstance("TLS").apply { init(null, trustAll, SecureRandom()) }
-        } else {
-            SSLContext.getDefault()
+        val rawSocket = openTcp(
+            host = host,
+            port = port,
+            timeoutMs = timeoutMs,
+            protector = protector,
+            soTimeoutMs = timeoutMs,
+            retryOnTransient = retryOnTransient
+        )
+        return try {
+            val sslContext = if (allowInsecure) {
+                val trustAll = arrayOf<TrustManager>(object : X509TrustManager {
+                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+                })
+                SSLContext.getInstance("TLS").apply { init(null, trustAll, SecureRandom()) }
+            } else {
+                SSLContext.getDefault()
+            }
+            val factory = sslContext.socketFactory
+            val effectiveSni = sni.ifBlank { host }
+            val sslSocket = factory.createSocket(rawSocket, effectiveSni, port, true) as SSLSocket
+            val params = sslSocket.sslParameters
+            if (effectiveSni.isNotBlank() && !isIpLiteral(effectiveSni)) {
+                params.serverNames = listOf(SNIHostName(effectiveSni))
+            }
+            sslSocket.sslParameters = params
+            sslSocket.startHandshake()
+            sslSocket.soTimeout = soTimeoutMs.coerceAtLeast(0)
+            sslSocket
+        } catch (e: Exception) {
+            runCatching { rawSocket.close() }
+            throw e
         }
-        val factory = sslContext.socketFactory
-        val effectiveSni = sni.ifBlank { host }
-        val sslSocket = factory.createSocket(rawSocket, effectiveSni, port, true) as SSLSocket
-        val params = sslSocket.sslParameters
-        if (effectiveSni.isNotBlank() && !isIpLiteral(effectiveSni)) {
-            params.serverNames = listOf(SNIHostName(effectiveSni))
-        }
-        sslSocket.sslParameters = params
-        sslSocket.startHandshake()
-        sslSocket.soTimeout = soTimeoutMs.coerceAtLeast(0)
-        return sslSocket
     }
 
     private fun isIpLiteral(host: String): Boolean {

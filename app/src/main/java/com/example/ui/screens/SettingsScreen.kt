@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
+import android.app.StatusBarManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -25,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.BrightnessMedium
@@ -32,12 +35,14 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.NetworkCheck
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -66,23 +71,30 @@ import com.example.model.AppLanguage
 import com.example.model.AppThemeMode
 import com.example.model.BatteryMode
 import com.example.ui.i18n.AppStrings
+import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.vpn.BaldrQuickTileService
+import com.example.vpn.LowBatteryState
+import com.example.vpn.RemoteUpdateState
+import com.example.widget.BaldrVpnWidgetProvider
 
 @Composable
 fun SettingsScreen(
     strings: AppStrings,
     settings: AppSettings,
+    lowBatteryState: LowBatteryState = LowBatteryState(),
     logs: List<String>,
     fcmToken: String?,
     installationId: String?,
     onSetBatteryMode: (BatteryMode) -> Unit,
+    onSetLowBatteryAutoMode: (Boolean) -> Unit = {},
     onSetDns: (String, String) -> Unit,
     onSetMtu: (Int) -> Unit,
     onSetAutoCheckIp: (Boolean) -> Unit,
     onSetLanguage: (AppLanguage) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onSetCrashlyticsEnabled: (Boolean) -> Unit,
-    onCheckRemoteUpdates: (onDone: (Boolean) -> Unit) -> Unit,
+    onCheckRemoteUpdates: (onDone: (RemoteUpdateState) -> Unit) -> Unit,
     onTestAnalytics: (onDone: (Boolean) -> Unit) -> Unit,
     onClearLogs: () -> Unit,
     modifier: Modifier = Modifier
@@ -164,6 +176,71 @@ fun SettingsScreen(
                             Text(strings.batteryBalancedTitle, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                             Text(strings.batteryBalancedDesc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f))
+
+                    // Low-Battery Operation (<20%) Automatic Power Saver
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSetLowBatteryAutoMode(!settings.lowBatteryAutoModeEnabled) }
+                            .testTag("low_battery_mode_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = strings.lowBatteryModeTitle,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Text(
+                                text = strings.lowBatteryModeDesc,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (settings.lowBatteryAutoModeEnabled) {
+                                val badgeColor = if (lowBatteryState.isLowBatteryActive) {
+                                    AmberStatus
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                                Surface(
+                                    color = badgeColor.copy(alpha = 0.14f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.35f)),
+                                    modifier = Modifier.testTag("low_battery_status_chip")
+                                ) {
+                                    Text(
+                                        text = if (lowBatteryState.isLowBatteryActive) {
+                                            strings.lowBatteryActiveBadge(lowBatteryState.batteryPercent)
+                                        } else {
+                                            strings.lowBatteryStandbyBadge(lowBatteryState.batteryPercent)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = badgeColor,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Switch(
+                            checked = settings.lowBatteryAutoModeEnabled,
+                            onCheckedChange = onSetLowBatteryAutoMode,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("low_battery_mode_toggle")
+                        )
                     }
 
                     OutlinedButton(
@@ -392,6 +469,75 @@ fun SettingsScreen(
                 }
             }
 
+            // Quick Access: Compact Home Widget & Notification Panel Quick Settings Tile
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Filled.AddToHomeScreen, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text(strings.shortcutsSectionTitle, style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val requested = BaldrVpnWidgetProvider.requestPinWidget(context)
+                            if (!requested) {
+                                Toast.makeText(context, strings.pinWidgetNotSupportedToast, Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("pin_widget_button")
+                    ) {
+                        Icon(Icons.Filled.AddToHomeScreen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.pinWidgetButton)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (BaldrQuickTileService.canRequestAddTile()) {
+                                BaldrQuickTileService.requestAddTileToPanel(context) { resultCode ->
+                                    val msg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                        (resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ||
+                                            resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED)
+                                    ) {
+                                        strings.quickTileAddedToast
+                                    } else {
+                                        strings.quickTileManualHintToast
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                }
+                            } else {
+                                Toast.makeText(context, strings.quickTileManualHintToast, Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("add_quick_tile_button")
+                    ) {
+                        Icon(Icons.Filled.NotificationsActive, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.addQuickTileButton)
+                    }
+                }
+            }
+
             // Firebase Services & Remote Update Card
             Card(
                 shape = RoundedCornerShape(20.dp),
@@ -414,11 +560,25 @@ fun SettingsScreen(
                         Text(strings.firebaseServicesSectionTitle, style = MaterialTheme.typography.titleMedium)
                     }
 
+                    val fidSummary = installationId?.take(10)?.plus("...") ?: "Pending"
+                    val fcmSummary = if (!fcmToken.isNullOrBlank()) "Ready" else "Pending"
+                    Text(
+                        text = "${strings.firebaseStatusLabel}: FID=$fidSummary • FCM=$fcmSummary",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = JetBrainsMonoFamily,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
                     Button(
                         onClick = {
-                            onCheckRemoteUpdates { hasUpdate ->
-                                if (!hasUpdate) {
-                                    Toast.makeText(context, strings.noUpdateAvailableToast, Toast.LENGTH_SHORT).show()
+                            onCheckRemoteUpdates { state ->
+                                if (!state.hasUpdate) {
+                                    val msg = if (state.fetchSucceeded) {
+                                        strings.noUpdateAvailableToast
+                                    } else {
+                                        strings.remoteConfigFetchFailedToast
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                                 }
                             }
                         },

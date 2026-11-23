@@ -40,6 +40,7 @@ class SshConnector(
     }
 
     private val closed = AtomicBoolean(false)
+    private val lowBatteryMode = AtomicBoolean(false)
     private val slots = Array(POOL_SIZE) { SessionSlot(it) }
     private val consecutiveReconnectFailures = AtomicInteger(0)
 
@@ -52,6 +53,40 @@ class SshConnector(
         if (closed.get()) return false
         return slots.any { it.isConnected() } || consecutiveReconnectFailures.get() == 0
     }
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        if (closed.get()) return@withContext false
+        val alive = slots.firstOrNull { it.isConnected() }
+        if (alive != null) {
+            val keepAliveOk = runCatching {
+                alive.session?.sendKeepAliveMsg()
+                alive.isConnected()
+            }.getOrDefault(false)
+            if (keepAliveOk) return@withContext true
+        }
+        // Session went silent — attempt silent slot heal before reporting down
+        runCatching {
+            slots[0].lock.withLock {
+                ensureSlotConnectedLocked(slots[0], forceReconnect = true)
+            }
+            slots[0].isConnected()
+        }.getOrDefault(false)
+    }
+
+    override fun setLowBatteryMode(enabled: Boolean) {
+        if (lowBatteryMode.getAndSet(enabled) == enabled) return
+        val intervalMs = effectiveKeepAliveIntervalMs()
+        slots.forEach { slot ->
+            slot.session?.let { activeSession ->
+                if (activeSession.isConnected) {
+                    runCatching { activeSession.serverAliveInterval = intervalMs }
+                }
+            }
+        }
+    }
+
+    internal fun effectiveKeepAliveIntervalMs(): Int =
+        if (lowBatteryMode.get()) KEEPALIVE_INTERVAL_LOW_BATTERY_MS else KEEPALIVE_INTERVAL_MS
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         if (closed.get()) throw IOException("SSH connector is closed")
@@ -109,7 +144,8 @@ class SshConnector(
         val connectedSlots = slots.filter { it.isConnected() }
         if (connectedSlots.isNotEmpty()) {
             val leastLoaded = connectedSlots.minBy { it.openChannels.get() }
-            if (leastLoaded.openChannels.get() >= SECONDARY_WARM_THRESHOLD &&
+            if (!lowBatteryMode.get() &&
+                leastLoaded.openChannels.get() >= SECONDARY_WARM_THRESHOLD &&
                 connectedSlots.size < slots.size
             ) {
                 val coldSlot = slots.firstOrNull { !it.isConnected() }
@@ -230,9 +266,9 @@ class SshConnector(
             setConfig("compression.s2c", "none")
             setConfig("compression.c2s", "none")
 
-            // Aggressive mobile NAT keepalive (12s interval x 5 retries = 60s grace period)
+            // Mobile NAT keepalive: 12s normal, reduced to 60s in Low-Battery Operation mode
             timeout = SESSION_SOCKET_TIMEOUT_MS
-            serverAliveInterval = KEEPALIVE_INTERVAL_MS
+            serverAliveInterval = effectiveKeepAliveIntervalMs()
             serverAliveCountMax = KEEPALIVE_MAX_COUNT
 
             setSocketFactory(object : SocketFactory {
@@ -337,6 +373,7 @@ class SshConnector(
         private const val CHANNEL_CONNECT_TIMEOUT_MS = 10_000
         private const val SESSION_SOCKET_TIMEOUT_MS = 20_000
         private const val KEEPALIVE_INTERVAL_MS = 12_000
+        private const val KEEPALIVE_INTERVAL_LOW_BATTERY_MS = 60_000
         private const val KEEPALIVE_MAX_COUNT = 5
         private const val DNS_CACHE_TTL_MS = 10 * 60 * 1000L
 

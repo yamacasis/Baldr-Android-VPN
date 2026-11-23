@@ -371,4 +371,292 @@ class VpnCoreUnitTest {
         com.example.vpn.AppAnalytics.logSubscriptionSynced(5)
         com.example.vpn.AppAnalytics.sendDiagnosticTestEvent(context)
     }
+
+    @Test
+    fun vpnShortcutController_cachesLastServerAndDetectsBusyStates() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val profile = com.example.model.VpnProfile(
+            id = 42L,
+            name = "Germany-Fast",
+            protocol = VpnProtocol.VLESS,
+            host = "de.example.com",
+            port = 443
+        )
+        com.example.vpn.VpnShortcutController.cacheLastServer(context, profile)
+        assertEquals(42L, com.example.vpn.VpnShortcutController.getCachedLastServerId(context))
+        assertEquals("Germany-Fast", com.example.vpn.VpnShortcutController.getCachedLastServerName(context))
+        assertEquals("VLESS", com.example.vpn.VpnShortcutController.getCachedProtocolBadge(context))
+
+        org.junit.Assert.assertTrue(com.example.vpn.VpnShortcutController.isTunnelActiveOrBusy(com.example.model.ConnectionState.CONNECTED))
+        org.junit.Assert.assertTrue(com.example.vpn.VpnShortcutController.isTunnelActiveOrBusy(com.example.model.ConnectionState.CONNECTING))
+        org.junit.Assert.assertTrue(com.example.vpn.VpnShortcutController.isTunnelActiveOrBusy(com.example.model.ConnectionState.FIREWALL_LOCKED))
+        org.junit.Assert.assertFalse(com.example.vpn.VpnShortcutController.isTunnelActiveOrBusy(com.example.model.ConnectionState.DISCONNECTED))
+        org.junit.Assert.assertFalse(com.example.vpn.VpnShortcutController.isTunnelActiveOrBusy(com.example.model.ConnectionState.ERROR))
+    }
+
+    @Test
+    fun compactWidget_buildsRemoteViewsForCompactAndNormalSizes() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val profile = com.example.model.VpnProfile(
+            id = 7L,
+            name = "Tokyo-SS",
+            protocol = VpnProtocol.SHADOWSOCKS,
+            host = "jp.example.com",
+            port = 8388
+        )
+        com.example.vpn.VpnShortcutController.cacheLastServer(context, profile)
+        com.example.vpn.TunnelTelemetryBus.setConnectionState(com.example.model.ConnectionState.CONNECTED, profile)
+
+        val wideOptions = android.os.Bundle().apply {
+            putInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 160)
+        }
+        val wideViews = com.example.widget.BaldrVpnWidgetProvider.buildRemoteViews(context, wideOptions)
+        val wideInflated = wideViews.apply(context, android.widget.FrameLayout(context))
+        val nameView = wideInflated.findViewById<android.widget.TextView>(R.id.widget_server_name)
+        val statusView = wideInflated.findViewById<android.widget.TextView>(R.id.widget_status_text)
+        val textContainer = wideInflated.findViewById<android.view.View>(R.id.widget_text_container)
+        assertEquals("Tokyo-SS", nameView.text.toString())
+        assertEquals(context.getString(R.string.widget_status_connected), statusView.text.toString())
+        assertEquals(android.view.View.VISIBLE, textContainer.visibility)
+
+        val tinyOptions = android.os.Bundle().apply {
+            putInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 55)
+        }
+        val tinyViews = com.example.widget.BaldrVpnWidgetProvider.buildRemoteViews(context, tinyOptions)
+        val tinyInflated = tinyViews.apply(context, android.widget.FrameLayout(context))
+        val tinyTextContainer = tinyInflated.findViewById<android.view.View>(R.id.widget_text_container)
+        assertEquals(android.view.View.GONE, tinyTextContainer.visibility)
+
+        com.example.vpn.TunnelTelemetryBus.setConnectionState(com.example.model.ConnectionState.DISCONNECTED)
+    }
+
+    @Test
+    fun quickSettingsTile_mapsConnectionStatesAndHandlesSync() {
+        assertEquals(
+            android.service.quicksettings.Tile.STATE_ACTIVE,
+            com.example.vpn.BaldrQuickTileService.resolveTileState(com.example.model.ConnectionState.CONNECTED)
+        )
+        assertEquals(
+            android.service.quicksettings.Tile.STATE_ACTIVE,
+            com.example.vpn.BaldrQuickTileService.resolveTileState(com.example.model.ConnectionState.CONNECTING)
+        )
+        assertEquals(
+            android.service.quicksettings.Tile.STATE_INACTIVE,
+            com.example.vpn.BaldrQuickTileService.resolveTileState(com.example.model.ConnectionState.DISCONNECTED)
+        )
+    }
+
+    @Test
+    fun fcmService_parsesSilentRemoteSyncAndActionUrls() {
+        org.junit.Assert.assertTrue(
+            com.example.vpn.AppFirebaseMessagingService.shouldSyncRemoteConfig(
+                mapOf("sync_remote_config" to "true")
+            )
+        )
+        org.junit.Assert.assertTrue(
+            com.example.vpn.AppFirebaseMessagingService.shouldSyncRemoteConfig(
+                mapOf("forced_update" to "true")
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.vpn.AppFirebaseMessagingService.shouldSyncRemoteConfig(
+                mapOf("title" to "Hello")
+            )
+        )
+
+        assertEquals(
+            "https://example.com/app.apk",
+            com.example.vpn.AppFirebaseMessagingService.resolveActionUrl(
+                mapOf("apk_url" to "https://example.com/app.apk", "url" to "https://example.com")
+            )
+        )
+        assertEquals(
+            "https://example.com/news",
+            com.example.vpn.AppFirebaseMessagingService.resolveActionUrl(
+                mapOf("apk_url" to "invalid-url", "url" to "https://example.com/news")
+            )
+        )
+        org.junit.Assert.assertNull(
+            com.example.vpn.AppFirebaseMessagingService.resolveActionUrl(mapOf("url" to "ftp://bad"))
+        )
+    }
+
+    @Test
+    fun exitIpChecker_measuresRealTcpLatencyAndHandlesLoadBalance() {
+        java.net.ServerSocket(0, 5, java.net.InetAddress.getByName("127.0.0.1")).use { serverSocket ->
+            val port = serverSocket.localPort
+            val reachable = com.example.model.VpnProfile(
+                id = 1L,
+                name = "Local-Reachable",
+                protocol = VpnProtocol.VLESS,
+                host = "127.0.0.1",
+                port = port
+            )
+            val invalid = com.example.model.VpnProfile(
+                id = 2L,
+                name = "Invalid-Host",
+                protocol = VpnProtocol.VMESS,
+                host = "",
+                port = 0
+            )
+            val loadBalance = com.example.model.VpnProfile(
+                id = 3L,
+                name = "Combined-LB",
+                protocol = VpnProtocol.LOAD_BALANCE,
+                host = "multi",
+                port = 0,
+                memberProfileIds = "1,2"
+            )
+
+            val measured = kotlinx.coroutines.runBlocking {
+                com.example.data.ExitIpChecker.measureLatency(reachable, timeoutMs = 1500)
+            }
+            assertNotNull(measured)
+            org.junit.Assert.assertTrue(measured!! >= 1)
+
+            val invalidMs = kotlinx.coroutines.runBlocking {
+                com.example.data.ExitIpChecker.measureLatency(invalid, timeoutMs = 500)
+            }
+            org.junit.Assert.assertNull(invalidMs)
+
+            val lbMs = kotlinx.coroutines.runBlocking {
+                com.example.data.ExitIpChecker.measureLatency(
+                    loadBalance,
+                    allProfiles = listOf(reachable, invalid),
+                    timeoutMs = 1500
+                )
+            }
+            assertNotNull(lbMs)
+            org.junit.Assert.assertTrue(lbMs!! >= 1)
+        }
+    }
+
+    @Test
+    fun exitIpChecker_classifiesLatencySortsByFastestAndFindsFastestId() {
+        assertEquals(com.example.data.LatencyTier.UNTESTED, com.example.data.ExitIpChecker.classifyLatency(null))
+        assertEquals(com.example.data.LatencyTier.UNREACHABLE, com.example.data.ExitIpChecker.classifyLatency(-1))
+        assertEquals(com.example.data.LatencyTier.EXCELLENT, com.example.data.ExitIpChecker.classifyLatency(45))
+        assertEquals(com.example.data.LatencyTier.GOOD, com.example.data.ExitIpChecker.classifyLatency(180))
+        assertEquals(com.example.data.LatencyTier.FAIR, com.example.data.ExitIpChecker.classifyLatency(420))
+        assertEquals(com.example.data.LatencyTier.POOR, com.example.data.ExitIpChecker.classifyLatency(850))
+
+        val pTimeout = com.example.model.VpnProfile(id = 1L, name = "Dead", protocol = VpnProtocol.VLESS, host = "a", port = 443, latencyMs = -1)
+        val pUntested = com.example.model.VpnProfile(id = 2L, name = "New", protocol = VpnProtocol.VLESS, host = "b", port = 443, latencyMs = null)
+        val pSlow = com.example.model.VpnProfile(id = 3L, name = "Slow", protocol = VpnProtocol.VLESS, host = "c", port = 443, latencyMs = 310)
+        val pFast = com.example.model.VpnProfile(id = 4L, name = "Fast", protocol = VpnProtocol.VLESS, host = "d", port = 443, latencyMs = 52)
+        val pMed = com.example.model.VpnProfile(id = 5L, name = "Med", protocol = VpnProtocol.VLESS, host = "e", port = 443, latencyMs = 140)
+
+        val list = listOf(pTimeout, pUntested, pSlow, pFast, pMed)
+        assertEquals(4L, com.example.data.ExitIpChecker.findFastestProfileId(list))
+
+        val sorted = com.example.data.ExitIpChecker.sortProfilesByFastest(list)
+        assertEquals(listOf(4L, 5L, 3L, 2L, 1L), sorted.map { it.id })
+    }
+
+    @Test
+    fun lowBatteryController_activatesBelow20PercentAndReducesPingAndBackgroundPolicy() {
+        com.example.vpn.LowBatteryController.resetForTesting()
+        try {
+            assertEquals(19, com.example.vpn.LowBatteryController.parseBatteryPercent(19, 100))
+            assertEquals(15, com.example.vpn.LowBatteryController.parseBatteryPercent(3, 20))
+            assertEquals(-1, com.example.vpn.LowBatteryController.parseBatteryPercent(-1, 100))
+
+            // At 20%: normal operation
+            com.example.vpn.LowBatteryController.onBatteryReading(
+                level = 20,
+                scale = 100,
+                status = android.os.BatteryManager.BATTERY_STATUS_DISCHARGING,
+                plugged = 0
+            )
+            val at20 = com.example.vpn.LowBatteryController.state.value
+            org.junit.Assert.assertFalse(at20.isLowBatteryActive)
+            val normalPolicy = com.example.vpn.LowBatteryController.resolvePolicy(at20)
+            org.junit.Assert.assertFalse(normalPolicy.pauseHighResourceBackgroundTraffic)
+            assertEquals(6, normalPolicy.maxPingConcurrency)
+            assertEquals(0L, normalPolicy.pingPacingDelayMs)
+            org.junit.Assert.assertTrue(normalPolicy.allowAutoPingOnOpen)
+            org.junit.Assert.assertTrue(normalPolicy.allowAutoExitIpCheck)
+            org.junit.Assert.assertTrue(normalPolicy.allowBulkBenchmark)
+            assertEquals(12_000, normalPolicy.sshKeepAliveIntervalMs)
+            assertEquals(1_000L, normalPolicy.telemetrySampleIntervalMs)
+
+            // Drop to 19%: Low-Battery Operation engages automatically
+            com.example.vpn.LowBatteryController.onBatteryReading(
+                level = 19,
+                scale = 100,
+                status = android.os.BatteryManager.BATTERY_STATUS_DISCHARGING,
+                plugged = 0
+            )
+            com.example.vpn.LowBatteryController.updatePausedBackgroundOperations(3)
+            val at19 = com.example.vpn.LowBatteryController.state.value
+            org.junit.Assert.assertTrue(at19.isLowBatteryActive)
+            assertEquals(19, at19.batteryPercent)
+            assertEquals(3, at19.pausedBackgroundOperations)
+
+            val lowPolicy = com.example.vpn.LowBatteryController.resolvePolicy(at19)
+            org.junit.Assert.assertTrue(lowPolicy.pauseHighResourceBackgroundTraffic)
+            assertEquals(1, lowPolicy.maxPingConcurrency)
+            assertEquals(1_500L, lowPolicy.pingPacingDelayMs)
+            assertEquals(10_000L, lowPolicy.minSinglePingCooldownMs)
+            org.junit.Assert.assertFalse(lowPolicy.allowAutoPingOnOpen)
+            org.junit.Assert.assertFalse(lowPolicy.allowAutoExitIpCheck)
+            org.junit.Assert.assertFalse(lowPolicy.allowBulkBenchmark)
+            assertEquals(60_000, lowPolicy.sshKeepAliveIntervalMs)
+            assertEquals(5_000L, lowPolicy.telemetrySampleIntervalMs)
+            assertEquals(15_000L, lowPolicy.autoReconnectInitialBackoffMs)
+
+            // Disabling feature at 15% turns off Low-Battery Operation & resets paused count
+            com.example.vpn.LowBatteryController.onBatteryReading(
+                level = 15,
+                scale = 100,
+                status = android.os.BatteryManager.BATTERY_STATUS_DISCHARGING,
+                plugged = 0
+            )
+            com.example.vpn.LowBatteryController.setFeatureEnabled(false)
+            val disabledState = com.example.vpn.LowBatteryController.state.value
+            org.junit.Assert.assertFalse(disabledState.isLowBatteryActive)
+            assertEquals(0, disabledState.pausedBackgroundOperations)
+
+            // Re-enable and recover to 25%: returns to standby
+            com.example.vpn.LowBatteryController.setFeatureEnabled(true)
+            org.junit.Assert.assertTrue(com.example.vpn.LowBatteryController.state.value.isLowBatteryActive)
+            com.example.vpn.LowBatteryController.onBatteryReading(
+                level = 25,
+                scale = 100,
+                status = android.os.BatteryManager.BATTERY_STATUS_CHARGING,
+                plugged = android.os.BatteryManager.BATTERY_PLUGGED_USB
+            )
+            val recovered = com.example.vpn.LowBatteryController.state.value
+            org.junit.Assert.assertFalse(recovered.isLowBatteryActive)
+            org.junit.Assert.assertTrue(recovered.isCharging)
+            assertEquals(0, recovered.pausedBackgroundOperations)
+        } finally {
+            com.example.vpn.LowBatteryController.resetForTesting()
+        }
+    }
+
+    @Test
+    fun sshConnector_reducesKeepAlivePingFrequencyInLowBatteryMode() {
+        val profile = com.example.model.VpnProfile(
+            name = "SSH-Battery",
+            protocol = VpnProtocol.SSH,
+            host = "127.0.0.1",
+            port = 22,
+            usernameOrUuid = "user",
+            passwordOrSecret = "pass"
+        )
+        val connector = com.example.vpn.protocols.SshConnector(profile) { true }
+        assertEquals(12_000, connector.effectiveKeepAliveIntervalMs())
+        connector.setLowBatteryMode(true)
+        assertEquals(60_000, connector.effectiveKeepAliveIntervalMs())
+        connector.setLowBatteryMode(false)
+        assertEquals(12_000, connector.effectiveKeepAliveIntervalMs())
+        connector.close()
+    }
+
+    @Test
+    fun appSettings_enablesLowBatteryAutoModeByDefault() {
+        val defaults = com.example.data.AppSettings()
+        org.junit.Assert.assertTrue(defaults.lowBatteryAutoModeEnabled)
+    }
 }

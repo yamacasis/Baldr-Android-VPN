@@ -32,6 +32,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
@@ -59,6 +61,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -76,6 +79,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -95,6 +99,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.ConfigBackupManager
+import com.example.data.ExitIpChecker
+import com.example.data.LatencyTier
 import com.example.data.UriConfigParser
 import com.example.model.LoadBalanceStrategy
 import com.example.model.ProtocolGroup
@@ -106,10 +112,12 @@ import com.example.model.countryCodeToFlag
 import com.example.ui.BackupImportStatus
 import com.example.ui.BenchmarkUiState
 import com.example.ui.ClipboardPasteOutcome
+import com.example.ui.PingAllUiState
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.CoralError
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.vpn.LowBatteryState
 import com.example.vpn.formatRate
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,6 +130,8 @@ fun ServersScreen(
     pingingIds: Set<Long>,
     updatingSubscriptionIds: Set<Long> = emptySet(),
     benchmarkState: BenchmarkUiState,
+    pingAllState: PingAllUiState = PingAllUiState(),
+    lowBatteryState: LowBatteryState = LowBatteryState(),
     onSelectProfile: (Long) -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
     onDeleteProfile: (Long) -> Unit,
@@ -132,6 +142,9 @@ fun ServersScreen(
     onDeleteSubscription: (Long) -> Unit = {},
     onExportConfigs: (String) -> String,
     onImportConfigsOrUris: (String, String, (BackupImportStatus) -> Unit) -> Unit,
+    onPingProfile: (VpnProfile) -> Unit = {},
+    onPingAllServers: (List<VpnProfile>) -> Unit = {},
+    onStopPingAll: () -> Unit = {},
     onBenchmarkProfile: (VpnProfile) -> Unit,
     onTestAllServers: (List<VpnProfile>, Boolean, (VpnProfile) -> Unit) -> Unit,
     onStopBenchmarking: () -> Unit,
@@ -139,7 +152,10 @@ fun ServersScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val isLowBatteryActive = lowBatteryState.isLowBatteryActive
     var selectedFilter by remember { mutableStateOf<ProtocolGroup?>(null) }
+    var sortByFastest by remember { mutableStateOf(false) }
+    var didAutoPingOnOpen by remember { mutableStateOf(false) }
     var editingProfile by remember { mutableStateOf<VpnProfile?>(null) }
     var defaultNewProtocol by remember { mutableStateOf(VpnProtocol.VLESS) }
     var showEditorSheet by remember { mutableStateOf(false) }
@@ -151,8 +167,36 @@ fun ServersScreen(
     var showTestDialog by remember { mutableStateOf(false) }
     var autoConnectFastestChecked by remember { mutableStateOf(true) }
     var qrProfile by remember { mutableStateOf<VpnProfile?>(null) }
-    val filteredProfiles = remember(profiles, selectedFilter) {
-        if (selectedFilter == null) profiles else profiles.filter { it.protocol.group == selectedFilter }
+
+    LaunchedEffect(profiles, isLowBatteryActive) {
+        if (!didAutoPingOnOpen &&
+            !isLowBatteryActive &&
+            profiles.isNotEmpty() &&
+            !pingAllState.isPingingAll &&
+            !benchmarkState.isTestingAll
+        ) {
+            didAutoPingOnOpen = true
+            val untested = profiles.filter { it.latencyMs == null }
+            if (untested.isNotEmpty()) {
+                onPingAllServers(untested)
+            }
+        }
+    }
+
+    val filteredProfiles = remember(profiles, selectedFilter, sortByFastest) {
+        val groupFiltered = if (selectedFilter == null) {
+            profiles
+        } else {
+            profiles.filter { it.protocol.group == selectedFilter }
+        }
+        if (sortByFastest) {
+            ExitIpChecker.sortProfilesByFastest(groupFiltered)
+        } else {
+            groupFiltered
+        }
+    }
+    val fastestProfileId = remember(filteredProfiles) {
+        ExitIpChecker.findFastestProfileId(filteredProfiles)
     }
     val subscriptionNameById = remember(subscriptions) {
         subscriptions.associate { it.id to it.name }
@@ -244,7 +288,7 @@ fun ServersScreen(
                     .widthIn(max = 680.dp)
                     .fillMaxSize()
             ) {
-                // Header + Test All Connections Button
+                // Header + Ping All & Speed Test Actions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -254,27 +298,67 @@ fun ServersScreen(
                 ) {
                     Text(
                         text = strings.serversTitle,
-                        style = MaterialTheme.typography.headlineMedium
+                        style = MaterialTheme.typography.headlineMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
 
                     if (filteredProfiles.isNotEmpty()) {
-                        if (benchmarkState.isTestingAll) {
-                            FilledTonalButton(
-                                onClick = onStopBenchmarking,
-                                modifier = Modifier.testTag("stop_test_all_button")
-                            ) {
-                                Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(strings.stopTest)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (pingAllState.isPingingAll) {
+                                FilledTonalButton(
+                                    onClick = onStopPingAll,
+                                    modifier = Modifier.testTag("stop_ping_all_button")
+                                ) {
+                                    Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(strings.stopPingButton, maxLines = 1)
+                                }
+                            } else {
+                                FilledTonalButton(
+                                    onClick = { onPingAllServers(filteredProfiles) },
+                                    enabled = !benchmarkState.isTestingAll,
+                                    modifier = Modifier.testTag("ping_all_servers_button")
+                                ) {
+                                    Icon(Icons.Filled.NetworkPing, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(strings.pingAllButton, maxLines = 1)
+                                }
                             }
-                        } else {
-                            FilledTonalButton(
-                                onClick = { showTestDialog = true },
-                                modifier = Modifier.testTag("test_all_servers_button")
-                            ) {
-                                Icon(Icons.Filled.Speed, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(strings.testAllConnections)
+
+                            if (benchmarkState.isTestingAll) {
+                                FilledTonalIconButton(
+                                    onClick = onStopBenchmarking,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("stop_test_all_button")
+                                ) {
+                                    Icon(Icons.Filled.Stop, contentDescription = strings.stopTest, modifier = Modifier.size(20.dp))
+                                }
+                            } else {
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        if (isLowBatteryActive) {
+                                            Toast.makeText(
+                                                context,
+                                                strings.lowBatteryBenchmarkPausedToast,
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            showTestDialog = true
+                                        }
+                                    },
+                                    enabled = !pingAllState.isPingingAll,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("test_all_servers_button")
+                                ) {
+                                    Icon(Icons.Filled.Speed, contentDescription = strings.testAllConnections, modifier = Modifier.size(20.dp))
+                                }
                             }
                         }
                     }
@@ -358,8 +442,47 @@ fun ServersScreen(
                     }
                 }
 
-                // Live progress card when running Test All Servers
-                if (benchmarkState.isTestingAll) {
+                // Low-Battery Operation Notice (<20%)
+                if (isLowBatteryActive) {
+                    Surface(
+                        color = AmberStatus.copy(alpha = 0.14f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        border = BorderStroke(1.dp, AmberStatus.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .testTag("servers_low_battery_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.BatterySaver,
+                                contentDescription = null,
+                                tint = AmberStatus,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = strings.lowBatteryServersBanner(lowBatteryState.batteryPercent),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
+                // Live progress card when running Ping All or Test All Servers
+                if (pingAllState.isPingingAll || benchmarkState.isTestingAll) {
+                    val done = if (pingAllState.isPingingAll) pingAllState.completedCount else benchmarkState.completedCount
+                    val total = if (pingAllState.isPingingAll) pingAllState.totalCount else benchmarkState.totalCount
+                    val progressLabel = if (pingAllState.isPingingAll) {
+                        strings.pingingProgress(done, total)
+                    } else {
+                        strings.testingProgress(done, total)
+                    }
                     Surface(
                         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
                         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -368,20 +491,18 @@ fun ServersScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .testTag("benchmark_progress_banner")
+                            .testTag(if (pingAllState.isPingingAll) "ping_progress_banner" else "benchmark_progress_banner")
                     ) {
                         Column(
                             modifier = Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = strings.testingProgress(benchmarkState.completedCount, benchmarkState.totalCount),
+                                text = progressLabel,
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium
                             )
-                            val progress = if (benchmarkState.totalCount > 0) {
-                                benchmarkState.completedCount.toFloat() / benchmarkState.totalCount.toFloat()
-                            } else 0f
+                            val progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
                             LinearProgressIndicator(
                                 progress = { progress },
                                 modifier = Modifier.fillMaxWidth()
@@ -390,7 +511,7 @@ fun ServersScreen(
                     }
                 }
 
-                // Protocol filter chips
+                // Protocol filter chips + Fastest First sort toggle
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -398,6 +519,19 @@ fun ServersScreen(
                         .padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    FilterChip(
+                        selected = sortByFastest,
+                        onClick = { sortByFastest = !sortByFastest },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Bolt,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text(strings.sortByFastestChip) },
+                        modifier = Modifier.testTag("sort_fastest_chip")
+                    )
                     FilterChip(
                         selected = selectedFilter == null,
                         onClick = { selectedFilter = null },
@@ -489,13 +623,16 @@ fun ServersScreen(
                         items(filteredProfiles, key = { it.id }) { profile ->
                             val isSelected = profile.id == selectedProfileId
                             val isTesting = pingingIds.contains(profile.id)
+                            val isFastest = fastestProfileId != null && profile.id == fastestProfileId
                             ServerProfileCard(
                                 strings = strings,
                                 profile = profile,
                                 subscriptionName = if (profile.subscriptionId > 0L) subscriptionNameById[profile.subscriptionId] else null,
                                 isSelected = isSelected,
+                                isFastest = isFastest,
                                 isTesting = isTesting,
                                 onSelect = { onSelectProfile(profile.id) },
+                                onPing = { onPingProfile(profile) },
                                 onBenchmark = { onBenchmarkProfile(profile) },
                                 onShareQr = { qrProfile = profile },
                                 onCopyUri = {
@@ -694,8 +831,10 @@ private fun ServerProfileCard(
     profile: VpnProfile,
     subscriptionName: String? = null,
     isSelected: Boolean,
+    isFastest: Boolean = false,
     isTesting: Boolean,
     onSelect: () -> Unit,
+    onPing: () -> Unit,
     onBenchmark: () -> Unit,
     onShareQr: () -> Unit,
     onCopyUri: () -> Unit,
@@ -703,6 +842,20 @@ private fun ServerProfileCard(
     onDelete: () -> Unit
 ) {
     val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    val latencyTier = ExitIpChecker.classifyLatency(profile.latencyMs)
+    val latencyAccent = when (latencyTier) {
+        LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primary
+        LatencyTier.FAIR -> AmberStatus
+        LatencyTier.POOR, LatencyTier.UNREACHABLE -> CoralError
+        LatencyTier.UNTESTED -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val latencyContainerColor = when (latencyTier) {
+        LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f)
+        LatencyTier.FAIR -> AmberStatus.copy(alpha = 0.16f)
+        LatencyTier.POOR, LatencyTier.UNREACHABLE -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+        LatencyTier.UNTESTED -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    }
+
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
@@ -757,7 +910,13 @@ private fun ServerProfileCard(
                         )
                         val subtitleText = if (profile.protocol == VpnProtocol.LOAD_BALANCE) {
                             val memberCount = profile.parsedMemberIds().size
-                            "${strings.membersCountBadge(memberCount)} • ${profile.loadBalanceStrategy.name}"
+                            val strategyLabel = when (profile.loadBalanceStrategy) {
+                                LoadBalanceStrategy.FAILOVER -> "Dual-VPN"
+                                LoadBalanceStrategy.LEAST_LATENCY -> "Least Latency"
+                                LoadBalanceStrategy.ROUND_ROBIN -> "Round-Robin"
+                                LoadBalanceStrategy.RANDOM -> "Random"
+                            }
+                            "${strings.membersCountBadge(memberCount)} • $strategyLabel"
                         } else if (!subscriptionName.isNullOrBlank()) {
                             "${profile.host}:${profile.port} • $subscriptionName"
                         } else {
@@ -778,6 +937,32 @@ private fun ServerProfileCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    if (isFastest) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.testTag("fastest_badge_${profile.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Bolt,
+                                    contentDescription = strings.fastestBadge,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = strings.fastestBadge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    }
                     if (isSelected) {
                         Icon(
                             imageVector = Icons.Filled.CheckCircle,
@@ -806,7 +991,7 @@ private fun ServerProfileCard(
                 }
             }
 
-            // Bottom action row: Ping + Download Speed badge + Actions
+            // Bottom action row: Instant Ping (ms) pill + Optional Download Speed badge + Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -818,11 +1003,12 @@ private fun ServerProfileCard(
                 ) {
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        color = latencyContainerColor,
+                        contentColor = latencyAccent,
+                        border = BorderStroke(1.dp, latencyAccent.copy(alpha = 0.35f)),
                         modifier = Modifier
                             .clip(RoundedCornerShape(50))
-                            .clickable(enabled = !isTesting, onClick = onBenchmark)
+                            .clickable(enabled = !isTesting, onClick = onPing)
                             .testTag("ping_button_${profile.id}")
                     ) {
                         Row(
@@ -835,28 +1021,27 @@ private fun ServerProfileCard(
                                 Text(
                                     text = strings.testingNow,
                                     fontFamily = JetBrainsMonoFamily,
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             } else {
                                 Icon(
                                     imageVector = Icons.Filled.NetworkPing,
-                                    contentDescription = strings.testLatency,
+                                    contentDescription = strings.tapToPingLabel,
                                     modifier = Modifier.size(14.dp),
-                                    tint = when (val ms = profile.latencyMs) {
-                                        null -> MaterialTheme.colorScheme.onSurfaceVariant
-                                        in 1..250 -> MaterialTheme.colorScheme.primary
-                                        in 251..700 -> AmberStatus
-                                        else -> CoralError
-                                    }
+                                    tint = latencyAccent
                                 )
                                 Text(
                                     text = when (val ms = profile.latencyMs) {
-                                        null -> strings.testLatency
-                                        -1 -> strings.testFailed
+                                        null -> strings.tapToPingLabel
+                                        in Int.MIN_VALUE..0 -> strings.pingTimeoutLabel
                                         else -> strings.latencyMs(ms)
                                     },
                                     fontFamily = JetBrainsMonoFamily,
-                                    fontSize = 11.sp
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.sp,
+                                    color = latencyAccent,
+                                    modifier = Modifier.testTag("latency_text_${profile.id}")
                                 )
                             }
                         }
@@ -873,7 +1058,10 @@ private fun ServerProfileCard(
                                 contentColor = if (bps > 0L)
                                     MaterialTheme.colorScheme.onPrimaryContainer
                                 else
-                                    MaterialTheme.colorScheme.onErrorContainer
+                                    MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable(onClick = onBenchmark)
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -882,7 +1070,7 @@ private fun ServerProfileCard(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Filled.Speed,
-                                        contentDescription = null,
+                                        contentDescription = strings.speedTestActionDesc,
                                         modifier = Modifier.size(13.dp),
                                         tint = if (bps > 0L) MaterialTheme.colorScheme.primary else CoralError
                                     )
@@ -899,6 +1087,17 @@ private fun ServerProfileCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (profile.lastSpeedBps == null) {
+                        IconButton(
+                            onClick = onBenchmark,
+                            enabled = !isTesting,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("speed_test_button_${profile.id}")
+                        ) {
+                            Icon(Icons.Filled.Speed, contentDescription = strings.speedTestActionDesc, modifier = Modifier.size(20.dp))
+                        }
+                    }
                     IconButton(
                         onClick = onShareQr,
                         modifier = Modifier.minimumInteractiveComponentSize()
@@ -1240,7 +1439,7 @@ private fun ServerEditorBottomSheet(
         mutableStateOf(initialProfile?.parsedMemberIds()?.toSet() ?: emptySet())
     }
     var strategy by remember {
-        mutableStateOf(initialProfile?.loadBalanceStrategy ?: LoadBalanceStrategy.ROUND_ROBIN)
+        mutableStateOf(initialProfile?.loadBalanceStrategy ?: LoadBalanceStrategy.FAILOVER)
     }
 
     ModalBottomSheet(
@@ -1300,8 +1499,9 @@ private fun ServerEditorBottomSheet(
                 Text(text = strings.loadBalanceStrategyLabel, style = MaterialTheme.typography.labelLarge)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
-                        LoadBalanceStrategy.ROUND_ROBIN to strings.strategyRoundRobin,
+                        LoadBalanceStrategy.FAILOVER to strings.strategyFailover,
                         LoadBalanceStrategy.LEAST_LATENCY to strings.strategyLeastLatency,
+                        LoadBalanceStrategy.ROUND_ROBIN to strings.strategyRoundRobin,
                         LoadBalanceStrategy.RANDOM to strings.strategyRandom
                     ).forEach { (st, label) ->
                         Surface(

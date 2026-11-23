@@ -14,6 +14,20 @@ class Socks5Connector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            ProtectedSocketFactory.openTcp(
+                host = profile.host,
+                port = profile.port,
+                timeoutMs = 4_500,
+                protector = protector,
+                soTimeoutMs = 4_500,
+                retryOnTransient = false
+            ).use { s -> performHandshake(s) }
+            true
+        }.getOrDefault(false)
+    }
+
     override suspend fun connect() = withContext(Dispatchers.IO) {
         // Verify handshake works with proxy server on connect
         val probe = ProtectedSocketFactory.openTcp(profile.host, profile.port, 8000, protector)
@@ -102,6 +116,20 @@ class Socks4Connector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            ProtectedSocketFactory.openTcp(
+                host = profile.host,
+                port = profile.port,
+                timeoutMs = 4_500,
+                protector = protector,
+                soTimeoutMs = 4_500,
+                retryOnTransient = false
+            ).close()
+            true
+        }.getOrDefault(false)
+    }
+
     override suspend fun connect() = withContext(Dispatchers.IO) {
         val probe = ProtectedSocketFactory.openTcp(profile.host, profile.port, 8000, protector)
         probe.close()
@@ -155,6 +183,34 @@ class HttpProxyConnector(
     private val profile: VpnProfile,
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
+
+    override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val probe = if (profile.tlsEnabled) {
+                ProtectedSocketFactory.openTls(
+                    host = profile.host,
+                    port = profile.port,
+                    sni = profile.sni.ifBlank { profile.host },
+                    allowInsecure = profile.allowInsecure,
+                    timeoutMs = 4_500,
+                    protector = protector,
+                    soTimeoutMs = 4_500,
+                    retryOnTransient = false
+                )
+            } else {
+                ProtectedSocketFactory.openTcp(
+                    host = profile.host,
+                    port = profile.port,
+                    timeoutMs = 4_500,
+                    protector = protector,
+                    soTimeoutMs = 4_500,
+                    retryOnTransient = false
+                )
+            }
+            probe.close()
+            true
+        }.getOrDefault(false)
+    }
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         val probe = if (profile.tlsEnabled) {

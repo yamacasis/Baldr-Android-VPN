@@ -24,6 +24,7 @@ import com.example.model.BatteryMode
 import com.example.model.ConnectionState
 import com.example.model.ExitNetworkInfo
 import com.example.model.InstalledAppInfo
+import com.example.model.MultiTunnelStatus
 import com.example.model.TrafficStatsSnapshot
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
@@ -31,11 +32,19 @@ import com.example.model.VpnProtocol
 import com.example.model.VpnSubscription
 import com.example.vpn.AppAnalytics
 import com.example.vpn.CrashReporter
+import com.example.vpn.LowBatteryController
+import com.example.vpn.LowBatteryState
 import com.example.vpn.NetShieldVpnService
 import com.example.vpn.RemoteUpdateManager
 import com.example.vpn.RemoteUpdateState
 import com.example.vpn.TunnelTelemetryBus
+import com.example.vpn.VpnShortcutController
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,10 +52,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.atomic.AtomicInteger
 
 data class BenchmarkUiState(
     val isTestingAll: Boolean = false,
+    val completedCount: Int = 0,
+    val totalCount: Int = 0
+)
+
+data class PingAllUiState(
+    val isPingingAll: Boolean = false,
     val completedCount: Int = 0,
     val totalCount: Int = 0
 )
@@ -84,6 +103,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val activeTunnelProfile: StateFlow<VpnProfile?> = TunnelTelemetryBus.activeProfile
     val trafficStats: StateFlow<TrafficStatsSnapshot> = TunnelTelemetryBus.trafficStats
     val appTraffic: StateFlow<List<AppTrafficInfo>> = TunnelTelemetryBus.appTraffic
+    val multiTunnelStatus: StateFlow<MultiTunnelStatus> = TunnelTelemetryBus.multiTunnelStatus
     val exitInfo: StateFlow<ExitNetworkInfo> = TunnelTelemetryBus.exitInfo
     val lastError: StateFlow<String?> = TunnelTelemetryBus.lastError
     val logs: StateFlow<List<String>> = TunnelTelemetryBus.logs
@@ -91,6 +111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val remoteUpdateState: StateFlow<RemoteUpdateState> = RemoteUpdateManager.updateState
     val fcmToken: StateFlow<String?> = AppAnalytics.fcmToken
     val installationId: StateFlow<String?> = AppAnalytics.installationId
+    val lowBatteryState: StateFlow<LowBatteryState> = LowBatteryController.state
 
     val selectedProfile: StateFlow<VpnProfile?> = combine(profiles, settings) { list, prefs ->
         list.firstOrNull { it.id == prefs.activeProfileId } ?: list.firstOrNull()
@@ -111,11 +132,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _benchmarkState = MutableStateFlow(BenchmarkUiState())
     val benchmarkState: StateFlow<BenchmarkUiState> = _benchmarkState.asStateFlow()
 
+    private val _pingAllState = MutableStateFlow(PingAllUiState())
+    val pingAllState: StateFlow<PingAllUiState> = _pingAllState.asStateFlow()
+
     private var benchmarkAllJob: Job? = null
+    private var pingAllJob: Job? = null
+    private val lastPingTimestampByProfile = ConcurrentHashMap<Long, Long>()
 
     init {
         val app = getApplication<Application>()
         AppAnalytics.init(app, analyticsEnabled = true)
+        LowBatteryController.startMonitoring(app)
+        viewModelScope.launch {
+            settingsRepo.settingsFlow.collect { prefs ->
+                LowBatteryController.setFeatureEnabled(prefs.lowBatteryAutoModeEnabled)
+            }
+        }
+        viewModelScope.launch {
+            LowBatteryController.state.collect { batteryState ->
+                if (batteryState.isLowBatteryActive && benchmarkAllJob?.isActive == true) {
+                    stopBenchmarking()
+                    TunnelTelemetryBus.appendLog(
+                        "Low-Battery Mode (${batteryState.batteryPercent}%): paused background server speed benchmark"
+                    )
+                }
+            }
+        }
         viewModelScope.launch {
             RemoteUpdateManager.refresh(app, forceFetch = false)
         }
@@ -137,14 +179,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectProfile(profileId: Long) {
         viewModelScope.launch {
             settingsRepo.setActiveProfileId(profileId)
+            val chosen = profileRepo.getById(profileId)
+            VpnShortcutController.cacheLastServer(getApplication(), chosen)
+            VpnShortcutController.syncWidgetAndTile(getApplication())
         }
     }
 
     fun saveProfile(profile: VpnProfile) {
         viewModelScope.launch {
             val savedId = profileRepo.save(profile)
-            if (settings.value.activeProfileId <= 0L) {
+            val resolved = profileRepo.getById(savedId)
+            if (settings.value.activeProfileId <= 0L || settings.value.activeProfileId == savedId) {
                 settingsRepo.setActiveProfileId(savedId)
+                VpnShortcutController.cacheLastServer(getApplication(), resolved)
+                VpnShortcutController.syncWidgetAndTile(getApplication())
             }
         }
     }
@@ -152,6 +200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteProfile(profileId: Long) {
         viewModelScope.launch {
             profileRepo.delete(profileId)
+            VpnShortcutController.refreshCachedServerAsync(getApplication())
         }
     }
 
@@ -203,6 +252,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (firstId > 0L) {
                 settingsRepo.setActiveProfileId(firstId)
+                VpnShortcutController.cacheLastServer(getApplication(), parsed.first().copy(id = firstId))
+                VpnShortcutController.syncWidgetAndTile(getApplication())
             }
             AppAnalytics.logConfigImported("clipboard", parsed.size)
             val summary = parsed.map { it.protocol.shortBadge }.distinct().joinToString(", ")
@@ -289,7 +340,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val insertedIds = profileRepo.replaceSubscriptionProfiles(sub.id, res.profiles)
                     if (insertedIds.isNotEmpty() && (settings.value.activeProfileId <= 0L || activeWasInSub)) {
-                        settingsRepo.setActiveProfileId(insertedIds.first())
+                        val firstId = insertedIds.first()
+                        settingsRepo.setActiveProfileId(firstId)
+                        VpnShortcutController.cacheLastServer(getApplication(), profileRepo.getById(firstId))
+                        VpnShortcutController.syncWidgetAndTile(getApplication())
                     }
                     val resolvedName = if (preferHeaderName && !res.titleFromHeader.isNullOrBlank()) {
                         res.titleFromHeader
@@ -392,13 +446,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun pingProfile(profile: VpnProfile) {
+        val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+        val now = System.currentTimeMillis()
+        val lastAt = lastPingTimestampByProfile[profile.id] ?: 0L
+        if (policy.minSinglePingCooldownMs > 0L &&
+            profile.latencyMs != null &&
+            now - lastAt < policy.minSinglePingCooldownMs
+        ) {
+            return
+        }
+        lastPingTimestampByProfile[profile.id] = now
+        viewModelScope.launch {
+            _pingingIds.update { it + profile.id }
+            try {
+                val ms = ExitIpChecker.measureLatency(profile, profiles.value)
+                profileRepo.updateLatency(profile.id, ms ?: -1)
+            } finally {
+                _pingingIds.update { it - profile.id }
+            }
+        }
+    }
+
+    fun pingAllServers(targetProfiles: List<VpnProfile>) {
+        if (targetProfiles.isEmpty()) return
+        pingAllJob?.cancel()
+        pingAllJob = viewModelScope.launch {
+            val total = targetProfiles.size
+            val completed = AtomicInteger(0)
+            _pingAllState.value = PingAllUiState(
+                isPingingAll = true,
+                completedCount = 0,
+                totalCount = total
+            )
+            val allSnapshot = profiles.value
+            val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+            val semaphore = Semaphore(permits = policy.maxPingConcurrency.coerceAtLeast(1))
+            val pacingDelayMs = policy.pingPacingDelayMs
+            try {
+                coroutineScope {
+                    targetProfiles.mapIndexed { index, profile ->
+                        async {
+                            semaphore.withPermit {
+                                if (pacingDelayMs > 0L && index > 0) {
+                                    delay(pacingDelayMs)
+                                }
+                                _pingingIds.update { it + profile.id }
+                                try {
+                                    lastPingTimestampByProfile[profile.id] = System.currentTimeMillis()
+                                    val ms = ExitIpChecker.measureLatency(profile, allSnapshot)
+                                    profileRepo.updateLatency(profile.id, ms ?: -1)
+                                } finally {
+                                    _pingingIds.update { it - profile.id }
+                                    val done = completed.incrementAndGet()
+                                    _pingAllState.value = PingAllUiState(
+                                        isPingingAll = true,
+                                        completedCount = done,
+                                        totalCount = total
+                                    )
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+            } finally {
+                val targetIdSet = targetProfiles.map { it.id }.toSet()
+                _pingingIds.update { it - targetIdSet }
+                _pingAllState.value = PingAllUiState()
+            }
+        }
+    }
+
+    fun stopPingAll() {
+        pingAllJob?.cancel()
+        pingAllJob = null
+        _pingingIds.value = emptySet()
+        _pingAllState.value = PingAllUiState()
+    }
+
     fun benchmarkProfile(profile: VpnProfile) {
         viewModelScope.launch {
-            _pingingIds.value = _pingingIds.value + profile.id
-            val all = profiles.value
-            val result = ExitIpChecker.benchmarkProfile(profile, all)
-            profileRepo.updateBenchmark(profile.id, result.latencyMs, result.downloadSpeedBps)
-            _pingingIds.value = _pingingIds.value - profile.id
+            _pingingIds.update { it + profile.id }
+            try {
+                val all = profiles.value
+                val result = ExitIpChecker.benchmarkProfile(profile, all)
+                profileRepo.updateBenchmark(profile.id, result.latencyMs, result.downloadSpeedBps)
+            } finally {
+                _pingingIds.update { it - profile.id }
+            }
         }
     }
 
@@ -408,6 +543,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onAutoConnect: (VpnProfile) -> Unit
     ) {
         if (targetProfiles.isEmpty()) return
+        val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+        if (!policy.allowBulkBenchmark) {
+            TunnelTelemetryBus.appendLog(
+                "Low-Battery Mode (${lowBatteryState.value.batteryPercent}%): paused bulk speed benchmark"
+            )
+            return
+        }
         benchmarkAllJob?.cancel()
         benchmarkAllJob = viewModelScope.launch {
             _benchmarkState.value = BenchmarkUiState(
@@ -483,6 +625,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startVpn(profile: VpnProfile) {
         viewModelScope.launch {
             settingsRepo.setActiveProfileId(profile.id)
+            VpnShortcutController.cacheLastServer(getApplication(), profile)
+            VpnShortcutController.syncWidgetAndTile(getApplication())
             val currentSettings = settings.value
             AppAnalytics.logVpnConnectAttempt(
                 protocol = profile.protocol.name,
@@ -506,6 +650,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val ctx = getApplication<Application>()
         val intent = Intent(ctx, NetShieldVpnService::class.java).apply {
             action = NetShieldVpnService.ACTION_DISCONNECT
+        }
+        ctx.startService(intent)
+    }
+
+    fun switchMultiVpnNode() {
+        if (connectionState.value != ConnectionState.CONNECTED) return
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, NetShieldVpnService::class.java).apply {
+            action = NetShieldVpnService.ACTION_SWITCH_MULTI_NODE
         }
         ctx.startService(intent)
     }
@@ -536,6 +689,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setBatteryMode(mode: BatteryMode) {
         viewModelScope.launch { settingsRepo.setBatteryMode(mode) }
+    }
+
+    fun setLowBatteryAutoModeEnabled(enabled: Boolean) {
+        LowBatteryController.setFeatureEnabled(enabled)
+        viewModelScope.launch { settingsRepo.setLowBatteryAutoModeEnabled(enabled) }
     }
 
     fun setDnsServers(primary: String, secondary: String) {

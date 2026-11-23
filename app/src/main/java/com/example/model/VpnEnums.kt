@@ -25,6 +25,7 @@ enum class ProtocolGroup {
 }
 
 enum class LoadBalanceStrategy {
+    FAILOVER,
     ROUND_ROBIN,
     LEAST_LATENCY,
     RANDOM

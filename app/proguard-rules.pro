@@ -1,21 +1,14 @@
 # Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+-keepattributes SourceFile,LineNumberTable
+-keepattributes *Annotation*
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Preserve Room entities, DAOs, and Kotlin Serialization routes/models
+-keep class com.example.model.** { *; }
+-keep class com.example.ui.navigation.** { *; }
+-keep,includedescriptorclasses class com.example.data.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Preserve Firebase messaging service & Crashlytics breadcrumbs
+-keep class com.example.vpn.AppFirebaseMessagingService { *; }
+-keep class com.example.vpn.CrashReporter { *; }
+-keep class com.example.vpn.AppAnalytics { *; }
+-keep class com.example.vpn.RemoteUpdateManager { *; }

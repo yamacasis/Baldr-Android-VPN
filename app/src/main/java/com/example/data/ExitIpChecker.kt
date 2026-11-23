@@ -4,15 +4,28 @@ import com.example.model.ExitNetworkInfo
 import com.example.model.VpnProfile
 import com.example.vpn.protocols.ProtocolConnectorFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.TimeUnit
+
+enum class LatencyTier {
+    EXCELLENT,   // 1..120 ms
+    GOOD,        // 121..250 ms
+    FAIR,        // 251..600 ms
+    POOR,        // > 600 ms
+    UNREACHABLE, // -1 (timeout / refused / unreachable)
+    UNTESTED     // null
+}
 
 data class ProfileBenchmarkResult(
     val latencyMs: Int?,
@@ -28,13 +41,71 @@ object ExitIpChecker {
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    suspend fun measureLatency(profile: VpnProfile): Int? = withContext(Dispatchers.IO) {
-        val start = System.nanoTime()
-        runCatching {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(profile.host, profile.port), 4000)
+    fun classifyLatency(latencyMs: Int?): LatencyTier = when {
+        latencyMs == null -> LatencyTier.UNTESTED
+        latencyMs < 0 -> LatencyTier.UNREACHABLE
+        latencyMs <= 120 -> LatencyTier.EXCELLENT
+        latencyMs <= 250 -> LatencyTier.GOOD
+        latencyMs <= 600 -> LatencyTier.FAIR
+        else -> LatencyTier.POOR
+    }
+
+    fun findFastestProfileId(profiles: List<VpnProfile>): Long? {
+        return profiles
+            .filter { (it.latencyMs ?: -1) > 0 }
+            .minByOrNull { it.latencyMs!! }
+            ?.id
+    }
+
+    fun sortProfilesByFastest(profiles: List<VpnProfile>): List<VpnProfile> {
+        return profiles.sortedWith(
+            compareBy<VpnProfile> { p ->
+                when (val ms = p.latencyMs) {
+                    null -> 1
+                    in 1..Int.MAX_VALUE -> 0
+                    else -> 2 // Unreachable (-1) goes to the bottom
+                }
+            }.thenBy { p ->
+                val ms = p.latencyMs
+                if (ms != null && ms > 0) ms else Int.MAX_VALUE
             }
-            ((System.nanoTime() - start) / 1_000_000L).toInt().coerceAtLeast(1)
+        )
+    }
+
+    /**
+     * Measures TCP round-trip latency (ms) to a server profile without establishing a VPN tunnel.
+     * For [com.example.model.VpnProtocol.LOAD_BALANCE] profiles, concurrently pings all member nodes
+     * and returns the lowest reachable latency.
+     */
+    suspend fun measureLatency(
+        profile: VpnProfile,
+        allProfiles: List<VpnProfile> = emptyList(),
+        timeoutMs: Int = 2500
+    ): Int? = withContext(Dispatchers.IO) {
+        if (profile.protocol == com.example.model.VpnProtocol.LOAD_BALANCE) {
+            val memberIds = profile.parsedMemberIds().toSet()
+            val members = allProfiles.filter { memberIds.contains(it.id) }
+            if (members.isEmpty()) return@withContext null
+            return@withContext coroutineScope {
+                members.map { member ->
+                    async { measureTcpHostLatency(member.host, member.port, timeoutMs) }
+                }.awaitAll().filterNotNull().minOrNull()
+            }
+        }
+        measureTcpHostLatency(profile.host, profile.port, timeoutMs)
+    }
+
+    private fun measureTcpHostLatency(host: String, port: Int, timeoutMs: Int): Int? {
+        val cleanHost = host.trim()
+        if (cleanHost.isEmpty() || port !in 1..65535) return null
+        return runCatching {
+            val resolvedAddr = InetAddress.getByName(cleanHost)
+            val startNs = System.nanoTime()
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(resolvedAddr, port), timeoutMs)
+            }
+            ((System.nanoTime() - startNs) / 1_000_000L).toInt().coerceAtLeast(1)
         }.getOrNull()
     }
 
@@ -49,13 +120,7 @@ object ExitIpChecker {
         allProfiles: List<VpnProfile> = emptyList()
     ): ProfileBenchmarkResult =
         withContext(Dispatchers.IO) {
-            val latency = if (profile.protocol == com.example.model.VpnProtocol.LOAD_BALANCE) {
-                val memberIds = profile.parsedMemberIds().toSet()
-                val members = allProfiles.filter { memberIds.contains(it.id) }
-                members.mapNotNull { measureLatency(it) }.minOrNull()
-            } else {
-                measureLatency(profile)
-            }
+            val latency = measureLatency(profile, allProfiles, timeoutMs = 4000)
             if (latency == null) {
                 return@withContext ProfileBenchmarkResult(
                     latencyMs = -1,

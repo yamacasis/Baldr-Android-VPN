@@ -31,7 +31,8 @@ data class AppSettings(
     val systemAlwaysOnShortcut: Boolean = false,
     val language: AppLanguage = AppLanguage.ENGLISH,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
-    val crashlyticsEnabled: Boolean = true
+    val crashlyticsEnabled: Boolean = true,
+    val lowBatteryAutoModeEnabled: Boolean = true
 )
 
 class SettingsRepository(private val context: Context) {
@@ -50,6 +51,7 @@ class SettingsRepository(private val context: Context) {
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val CRASHLYTICS_ENABLED = booleanPreferencesKey("crashlytics_enabled")
+        val LOW_BATTERY_AUTO_MODE = booleanPreferencesKey("low_battery_auto_mode")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -75,7 +77,8 @@ class SettingsRepository(private val context: Context) {
             themeMode = prefs[Keys.THEME_MODE]?.let { name ->
                 AppThemeMode.entries.firstOrNull { it.name == name }
             } ?: AppThemeMode.DARK,
-            crashlyticsEnabled = prefs[Keys.CRASHLYTICS_ENABLED] ?: true
+            crashlyticsEnabled = prefs[Keys.CRASHLYTICS_ENABLED] ?: true,
+            lowBatteryAutoModeEnabled = prefs[Keys.LOW_BATTERY_AUTO_MODE] ?: true
         )
     }
 
@@ -142,5 +145,9 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setCrashlyticsEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.CRASHLYTICS_ENABLED] = enabled }
+    }
+
+    suspend fun setLowBatteryAutoModeEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.LOW_BATTERY_AUTO_MODE] = enabled }
     }
 }

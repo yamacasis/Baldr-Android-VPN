@@ -68,6 +68,7 @@ fun SpeedSparklineChart(
         val dlPath = Path()
         val dlFill = Path()
         val ulPath = Path()
+        val ulFill = Path()
 
         samples.forEachIndexed { idx, sample ->
             val x = idx * stepX
@@ -79,21 +80,34 @@ fun SpeedSparklineChart(
                 dlFill.moveTo(x, h)
                 dlFill.lineTo(x, dlY)
                 ulPath.moveTo(x, ulY)
+                ulFill.moveTo(x, h)
+                ulFill.lineTo(x, ulY)
             } else {
                 dlPath.lineTo(x, dlY)
                 dlFill.lineTo(x, dlY)
                 ulPath.lineTo(x, ulY)
+                ulFill.lineTo(x, ulY)
             }
             if (idx == samples.lastIndex) {
                 dlFill.lineTo(x, h)
                 dlFill.close()
+                ulFill.lineTo(x, h)
+                ulFill.close()
             }
         }
 
         drawPath(
+            path = ulFill,
+            brush = Brush.verticalGradient(
+                colors = listOf(uploadColor.copy(alpha = 0.22f), Color.Transparent),
+                startY = 0f,
+                endY = h
+            )
+        )
+        drawPath(
             path = dlFill,
             brush = Brush.verticalGradient(
-                colors = listOf(downloadColor.copy(alpha = 0.28f), Color.Transparent),
+                colors = listOf(downloadColor.copy(alpha = 0.26f), Color.Transparent),
                 startY = 0f,
                 endY = h
             )

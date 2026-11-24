@@ -112,6 +112,7 @@ import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.BaldrGold
 import com.example.ui.theme.CoralError
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.ui.theme.LapisEmblemBg
 import com.example.vpn.LowBatteryState
 import com.example.vpn.formatBytes
 import com.example.vpn.formatRate
@@ -331,14 +332,26 @@ fun DashboardScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.ic_baldr_logo),
-                                contentDescription = strings.appTitle,
-                                contentScale = ContentScale.Crop,
+                            Box(
+                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                            )
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(LapisEmblemBg)
+                                    .border(
+                                        width = 1.dp,
+                                        color = BaldrGold.copy(alpha = 0.50f),
+                                        shape = RoundedCornerShape(11.dp)
+                                    )
+                                    .padding(2.dp)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.ic_baldr_logo),
+                                    contentDescription = strings.appTitle,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                             Text(
                                 text = strings.appTitle,
                                 style = MaterialTheme.typography.titleMedium,
@@ -489,13 +502,14 @@ fun DashboardScreen(
                     }
 
                     val primaryColor = MaterialTheme.colorScheme.primary
+                    val secondaryLapis = MaterialTheme.colorScheme.secondary
                     val goldColor = BaldrGold
 
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.padding(vertical = 4.dp)
                     ) {
-                        // Ultra-lightweight Canvas halo + staggered ripples + rotating accent arc when connected
+                        // Ultra-lightweight Canvas halo + staggered ripples + rotating orbital arc when connected
                         if (effectStrength > 0.01f || isActiveState) {
                             Canvas(
                                 modifier = Modifier
@@ -507,12 +521,13 @@ fun DashboardScreen(
                                 val maxRadius = size.minDimension / 2f
 
                                 if (effectStrength > 0.01f) {
-                                    // Soft radial aura
+                                    // Soft radial aura blending Jade + Lapis Lazuli + Gold
                                     drawCircle(
                                         brush = Brush.radialGradient(
                                             colors = listOf(
-                                                primaryColor.copy(alpha = 0.28f * effectStrength),
-                                                goldColor.copy(alpha = 0.14f * effectStrength),
+                                                primaryColor.copy(alpha = 0.24f * effectStrength),
+                                                secondaryLapis.copy(alpha = 0.18f * effectStrength),
+                                                goldColor.copy(alpha = 0.08f * effectStrength),
                                                 Color.Transparent
                                             ),
                                             center = center,
@@ -522,7 +537,7 @@ fun DashboardScreen(
                                         center = center
                                     )
 
-                                    // Two lightweight expanding shield rings
+                                    // Two lightweight expanding shield rings (Jade + Lapis Lazuli)
                                     val r1 = baseRadius + (maxRadius - baseRadius) * connectedWave1
                                     val a1 = (1f - connectedWave1) * 0.42f * effectStrength
                                     drawCircle(
@@ -533,28 +548,37 @@ fun DashboardScreen(
                                     )
 
                                     val r2 = baseRadius + (maxRadius - baseRadius) * connectedWave2
-                                    val a2 = (1f - connectedWave2) * 0.34f * effectStrength
+                                    val a2 = (1f - connectedWave2) * 0.38f * effectStrength
                                     drawCircle(
-                                        color = goldColor.copy(alpha = a2),
+                                        color = secondaryLapis.copy(alpha = a2),
                                         radius = r2,
                                         center = center,
-                                        style = Stroke(width = 1.6.dp.toPx())
+                                        style = Stroke(width = 1.8.dp.toPx())
                                     )
 
-                                    // Subtle rotating orbital arc
+                                    // Subtle rotating orbital arcs (Baldr Gold + Lapis Lazuli)
                                     val arcDiameter = baseRadius * 2.26f
                                     val topLeft = Offset(
                                         center.x - arcDiameter / 2f,
                                         center.y - arcDiameter / 2f
                                     )
                                     drawArc(
-                                        color = goldColor.copy(alpha = 0.65f * effectStrength),
+                                        color = goldColor.copy(alpha = 0.68f * effectStrength),
                                         startAngle = connectedSweep,
-                                        sweepAngle = 68f,
+                                        sweepAngle = 64f,
                                         useCenter = false,
                                         topLeft = topLeft,
                                         size = Size(arcDiameter, arcDiameter),
                                         style = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round)
+                                    )
+                                    drawArc(
+                                        color = secondaryLapis.copy(alpha = 0.52f * effectStrength),
+                                        startAngle = connectedSweep + 180f,
+                                        sweepAngle = 48f,
+                                        useCenter = false,
+                                        topLeft = topLeft,
+                                        size = Size(arcDiameter, arcDiameter),
+                                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
                                     )
                                 }
                             }
@@ -829,13 +853,14 @@ fun DashboardScreen(
                                             }
                                         }
                                         Surface(
-                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
                                             shape = RoundedCornerShape(8.dp)
                                         ) {
                                             Text(
                                                 text = displayProfile.protocol.shortBadge,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
                                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                             )
                                         }

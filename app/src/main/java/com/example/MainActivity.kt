@@ -20,6 +20,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -51,8 +53,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -103,6 +107,8 @@ import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplitTunnelScreen
+import com.example.ui.theme.BaldrGold
+import com.example.ui.theme.LapisEmblemBg
 import com.example.ui.theme.NetShieldTheme
 import com.example.vpn.AppAnalytics
 import com.example.vpn.CrashReporter
@@ -336,7 +342,11 @@ fun NetShieldApp(
                 }
             }
 
-            val bgDrawableRes = if (isDarkTheme) R.drawable.bg_baldr_dark else R.drawable.bg_baldr_light
+            val bgDrawableRes = if (isDarkTheme) {
+                R.drawable.bg_lapis_dark_1795506348696
+            } else {
+                R.drawable.bg_lapis_light_1795506391560
+            }
 
             Box(modifier = Modifier.fillMaxSize()) {
                 Image(
@@ -355,14 +365,22 @@ fun NetShieldApp(
                         bottomBar = {
                             if (!useRail) {
                                 NavigationBar(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
+                                    val navItemColors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = MaterialTheme.colorScheme.secondary,
+                                        selectedTextColor = MaterialTheme.colorScheme.secondary,
+                                        indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                     navItems.forEach { item ->
                                         val selected = currentDest?.hasRoute(item.route::class) == true
                                         NavigationBarItem(
                                             selected = selected,
                                             onClick = { navigateTo(item.route) },
+                                            colors = navItemColors,
                                             icon = {
                                                 Icon(
                                                     imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
@@ -384,14 +402,22 @@ fun NetShieldApp(
                         ) {
                             if (useRail) {
                                 NavigationRail(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
+                                    val railItemColors = NavigationRailItemDefaults.colors(
+                                        selectedIconColor = MaterialTheme.colorScheme.secondary,
+                                        selectedTextColor = MaterialTheme.colorScheme.secondary,
+                                        indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                     navItems.forEach { item ->
                                         val selected = currentDest?.hasRoute(item.route::class) == true
                                         NavigationRailItem(
                                             selected = selected,
                                             onClick = { navigateTo(item.route) },
+                                            colors = railItemColors,
                                             icon = {
                                                 Icon(
                                                     imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
@@ -686,15 +712,27 @@ private fun BaldrSplashOverlay(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.padding(24.dp)
         ) {
-            Image(
-                painter = painterResource(id = R.drawable.ic_baldr_logo),
-                contentDescription = title,
-                contentScale = ContentScale.Crop,
+            Box(
+                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(128.dp)
+                    .size(136.dp)
                     .scale(logoScale)
-                    .clip(RoundedCornerShape(30.dp))
-            )
+                    .clip(RoundedCornerShape(32.dp))
+                    .background(LapisEmblemBg)
+                    .border(
+                        width = 1.5.dp,
+                        color = BaldrGold.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(32.dp)
+                    )
+                    .padding(6.dp)
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.ic_baldr_logo),
+                    contentDescription = title,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             Spacer(modifier = Modifier.height(20.dp))
             Text(
                 text = title,

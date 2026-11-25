@@ -9,8 +9,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AppDatabase
 import com.example.data.AppSettings
+import com.example.data.CachedProviderEntry
 import com.example.data.ConfigBackupManager
 import com.example.data.ExitIpChecker
+import com.example.data.FreeProviderFetchResult
+import com.example.data.FreeProxyProvider
+import com.example.data.FreeProxyProviderCache
+import com.example.data.FreeProxyProviderManager
 import com.example.data.InstalledAppsRepository
 import com.example.data.ProfileRepository
 import com.example.data.SettingsRepository
@@ -69,6 +74,46 @@ data class PingAllUiState(
     val completedCount: Int = 0,
     val totalCount: Int = 0
 )
+
+enum class FreeProviderStage {
+    IDLE,
+    FETCHING,
+    PINGING,
+    VERIFYING,
+    CONNECTED,
+    FAILED
+}
+
+data class FreeProviderResultSnapshot(
+    val providerId: String,
+    val bestServerLabel: String,
+    val bestLatencyMs: Int?,
+    val reachableCount: Int,
+    val countryCode: String = "",
+    val testedAtMillis: Long = System.currentTimeMillis()
+)
+
+data class FreeProvidersUiState(
+    val activeProviderId: String? = null,
+    val stage: FreeProviderStage = FreeProviderStage.IDLE,
+    val usedOfflineFallback: Boolean = false,
+    val pingedCount: Int = 0,
+    val totalToPing: Int = 0,
+    val reachableCount: Int = 0,
+    val bestLatencyMs: Int? = null,
+    val errorMessage: String? = null,
+    val resultsByProviderId: Map<String, FreeProviderResultSnapshot> = emptyMap(),
+    val cachedEntries: Map<String, CachedProviderEntry> = emptyMap(),
+    val backgroundSyncProviderId: String? = null,
+    val backgroundSyncProviderName: String? = null,
+    val backgroundSyncCompleted: Int = 0,
+    val backgroundSyncTotal: Int = 0
+) {
+    val isBusy: Boolean
+        get() = stage == FreeProviderStage.FETCHING ||
+            stage == FreeProviderStage.PINGING ||
+            stage == FreeProviderStage.VERIFYING
+}
 
 sealed class BackupImportStatus {
     data class Success(val count: Int) : BackupImportStatus()
@@ -135,8 +180,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pingAllState = MutableStateFlow(PingAllUiState())
     val pingAllState: StateFlow<PingAllUiState> = _pingAllState.asStateFlow()
 
+    private val _freeProvidersState = MutableStateFlow(FreeProvidersUiState())
+    val freeProvidersState: StateFlow<FreeProvidersUiState> = _freeProvidersState.asStateFlow()
+
     private var benchmarkAllJob: Job? = null
     private var pingAllJob: Job? = null
+    private var freeProviderJob: Job? = null
+    private var backgroundFreeSyncJob: Job? = null
     private val lastPingTimestampByProfile = ConcurrentHashMap<Long, Long>()
 
     init {
@@ -144,17 +194,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         AppAnalytics.init(app, analyticsEnabled = true)
         LowBatteryController.startMonitoring(app)
         viewModelScope.launch {
+            val initialCache = FreeProxyProviderCache.loadAll(app)
+            _freeProvidersState.update { it.copy(cachedEntries = initialCache) }
+        }
+        viewModelScope.launch {
             settingsRepo.settingsFlow.collect { prefs ->
                 LowBatteryController.setFeatureEnabled(prefs.lowBatteryAutoModeEnabled)
             }
         }
         viewModelScope.launch {
             LowBatteryController.state.collect { batteryState ->
-                if (batteryState.isLowBatteryActive && benchmarkAllJob?.isActive == true) {
-                    stopBenchmarking()
-                    TunnelTelemetryBus.appendLog(
-                        "Low-Battery Mode (${batteryState.batteryPercent}%): paused background server speed benchmark"
-                    )
+                if (batteryState.isLowBatteryActive) {
+                    if (benchmarkAllJob?.isActive == true) {
+                        stopBenchmarking()
+                        TunnelTelemetryBus.appendLog(
+                            "Low-Battery Mode (${batteryState.batteryPercent}%): paused background server speed benchmark"
+                        )
+                    }
+                    if (backgroundFreeSyncJob?.isActive == true) {
+                        stopBackgroundFreeSync()
+                        TunnelTelemetryBus.appendLog(
+                            "Low-Battery Mode (${batteryState.batteryPercent}%): paused gradual free proxy list refresh"
+                        )
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            TunnelTelemetryBus.connectionState.collect { connState ->
+                if (connState == ConnectionState.CONNECTED) {
+                    startGradualFreeProvidersRefreshIfNeeded()
+                } else if (connState == ConnectionState.DISCONNECTED || connState == ConnectionState.ERROR) {
+                    stopBackgroundFreeSync()
                 }
             }
         }
@@ -603,6 +674,276 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         benchmarkAllJob = null
         _pingingIds.value = emptySet()
         _benchmarkState.value = BenchmarkUiState()
+    }
+
+    fun connectBestFromFreeProvider(
+        provider: FreeProxyProvider,
+        noServerMessage: String,
+        onBestServerReady: (VpnProfile) -> Unit
+    ) {
+        freeProviderJob?.cancel()
+        freeProviderJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            val isFarsi = settings.value.language == AppLanguage.FARSI
+            _freeProvidersState.update { current ->
+                current.copy(
+                    activeProviderId = provider.id,
+                    stage = FreeProviderStage.FETCHING,
+                    usedOfflineFallback = false,
+                    pingedCount = 0,
+                    totalToPing = 0,
+                    reachableCount = 0,
+                    bestLatencyMs = null,
+                    errorMessage = null
+                )
+            }
+            TunnelTelemetryBus.appendLog("Free Providers: fetching server list from ${provider.name}...")
+
+            val fetchResult = FreeProxyProviderManager.fetchCandidates(provider)
+            var usedFallback = false
+            val listUpdatedAt: Long
+            val candidates: List<VpnProfile> = when (fetchResult) {
+                is FreeProviderFetchResult.Success -> {
+                    val now = System.currentTimeMillis()
+                    val updatedCache = FreeProxyProviderCache.saveProviderUpdate(
+                        context = app,
+                        providerId = provider.id,
+                        profiles = fetchResult.candidates,
+                        updatedAtMillis = now
+                    )
+                    _freeProvidersState.update { it.copy(cachedEntries = updatedCache) }
+                    listUpdatedAt = now
+                    fetchResult.candidates
+                }
+                is FreeProviderFetchResult.Failure -> {
+                    // Seamless fallback to pre-bundled default / locally cached server list
+                    val (cachedProfiles, cachedTimestamp) = FreeProxyProviderCache.getCachedProfiles(app, provider)
+                    if (cachedProfiles.isNotEmpty()) {
+                        usedFallback = true
+                        listUpdatedAt = cachedTimestamp
+                        TunnelTelemetryBus.appendLog(
+                            "Free Providers: online fetch unavailable for ${provider.name} (${fetchResult.message}); using ${cachedProfiles.size} bundled/cached servers"
+                        )
+                        cachedProfiles
+                    } else {
+                        _freeProvidersState.update { current ->
+                            current.copy(
+                                activeProviderId = null,
+                                stage = FreeProviderStage.FAILED,
+                                errorMessage = "${provider.name}: ${fetchResult.message}"
+                            )
+                        }
+                        TunnelTelemetryBus.appendLog("Free Providers: ${provider.name} fetch failed (${fetchResult.message})")
+                        return@launch
+                    }
+                }
+            }
+
+            _freeProvidersState.update { current ->
+                current.copy(
+                    stage = FreeProviderStage.PINGING,
+                    usedOfflineFallback = usedFallback,
+                    pingedCount = 0,
+                    totalToPing = candidates.size
+                )
+            }
+
+            val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+            val concurrency = if (lowBatteryState.value.isLowBatteryActive) {
+                policy.maxPingConcurrency.coerceAtLeast(1)
+            } else {
+                8
+            }
+
+            val bestResult = FreeProxyProviderManager.pingAndPickBest(
+                candidates = candidates,
+                maxConcurrency = concurrency,
+                pacingDelayMs = policy.pingPacingDelayMs,
+                onProgress = { progress ->
+                    val nextStage = if (progress.pingedCount >= progress.totalCount && progress.reachableCount > 0) {
+                        FreeProviderStage.VERIFYING
+                    } else {
+                        FreeProviderStage.PINGING
+                    }
+                    _freeProvidersState.update { current ->
+                        current.copy(
+                            stage = nextStage,
+                            pingedCount = progress.pingedCount,
+                            totalToPing = progress.totalCount,
+                            reachableCount = progress.reachableCount,
+                            bestLatencyMs = progress.bestLatencyMs
+                        )
+                    }
+                }
+            )
+
+            val winner = bestResult.bestProfile
+            if (winner == null) {
+                _freeProvidersState.update { current ->
+                    current.copy(
+                        activeProviderId = null,
+                        stage = FreeProviderStage.FAILED,
+                        errorMessage = noServerMessage
+                    )
+                }
+                TunnelTelemetryBus.appendLog("Free Providers: no reachable servers found for ${provider.name}")
+                return@launch
+            }
+
+            // Include the provider list's update date directly in the saved free server name
+            val formattedWinnerName = FreeProxyProviderCache.formatServerNameWithDate(
+                providerName = provider.name,
+                baseServerLabel = winner.name,
+                updatedAtMillis = listUpdatedAt,
+                isFarsi = isFarsi
+            )
+
+            // Upsert one tidy saved profile per provider so the user's server list stays clean
+            val existingProviderProfile = profiles.value.firstOrNull {
+                it.subscriptionId == 0L && (
+                    it.name.startsWith("${provider.name} ·", ignoreCase = true) ||
+                        it.name.startsWith("${provider.name} (", ignoreCase = true)
+                    )
+            }
+            val profileToSave = winner.copy(
+                id = existingProviderProfile?.id ?: 0L,
+                name = formattedWinnerName
+            )
+            val savedId = profileRepo.save(profileToSave)
+            val savedProfile = profileRepo.getById(savedId) ?: profileToSave.copy(id = savedId)
+
+            settingsRepo.setActiveProfileId(savedId)
+            VpnShortcutController.cacheLastServer(app, savedProfile)
+            VpnShortcutController.syncWidgetAndTile(app)
+
+            val snapshot = FreeProviderResultSnapshot(
+                providerId = provider.id,
+                bestServerLabel = "${savedProfile.host}:${savedProfile.port}",
+                bestLatencyMs = savedProfile.latencyMs,
+                reachableCount = bestResult.reachableCount,
+                countryCode = savedProfile.lastCountryCode.orEmpty()
+            )
+            _freeProvidersState.update { current ->
+                current.copy(
+                    activeProviderId = null,
+                    stage = FreeProviderStage.CONNECTED,
+                    usedOfflineFallback = usedFallback,
+                    bestLatencyMs = savedProfile.latencyMs,
+                    reachableCount = bestResult.reachableCount,
+                    errorMessage = null,
+                    resultsByProviderId = current.resultsByProviderId + (provider.id to snapshot)
+                )
+            }
+            TunnelTelemetryBus.appendLog(
+                "Free Providers: connecting to best ${provider.name} node ${savedProfile.host}:${savedProfile.port} (${savedProfile.latencyMs ?: -1} ms)"
+            )
+            onBestServerReady(savedProfile)
+        }
+    }
+
+    fun cancelFreeProviderConnect() {
+        freeProviderJob?.cancel()
+        freeProviderJob = null
+        _freeProvidersState.update { current ->
+            current.copy(
+                activeProviderId = null,
+                stage = FreeProviderStage.IDLE,
+                usedOfflineFallback = false,
+                errorMessage = null
+            )
+        }
+    }
+
+    /**
+     * When VPN is connected, gradually refreshes free proxy provider lists one by one
+     * (spaced by 3.5s) so users in restricted networks automatically receive up-to-date
+     * lists and fresh update dates without overloading the tunnel or battery.
+     */
+    private fun startGradualFreeProvidersRefreshIfNeeded() {
+        if (backgroundFreeSyncJob?.isActive == true) return
+        if (lowBatteryState.value.isLowBatteryActive) return
+
+        backgroundFreeSyncJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            // Let the newly established VPN tunnel stabilize first
+            delay(4000L)
+            if (TunnelTelemetryBus.connectionState.value != ConnectionState.CONNECTED) return@launch
+            if (lowBatteryState.value.isLowBatteryActive) return@launch
+
+            val cache = FreeProxyProviderCache.loadAll(app)
+            val staleCutoffMs = System.currentTimeMillis() - (3L * 60L * 60L * 1000L) // 3 hours
+            val toRefresh = FreeProxyProviderManager.providers.filter { provider ->
+                val entry = cache[provider.id]
+                entry == null || entry.isDefaultBundle || entry.updatedAtMillis < staleCutoffMs
+            }
+            if (toRefresh.isEmpty()) return@launch
+
+            TunnelTelemetryBus.appendLog(
+                "VPN connected: starting gradual background update for ${toRefresh.size} free proxy providers"
+            )
+            val total = toRefresh.size
+            try {
+                toRefresh.forEachIndexed { index, provider ->
+                    if (TunnelTelemetryBus.connectionState.value != ConnectionState.CONNECTED) return@launch
+                    if (lowBatteryState.value.isLowBatteryActive) return@launch
+
+                    // Yield if the user manually initiated a provider ping/connect
+                    while (_freeProvidersState.value.isBusy) {
+                        delay(1500L)
+                        if (TunnelTelemetryBus.connectionState.value != ConnectionState.CONNECTED) return@launch
+                    }
+
+                    _freeProvidersState.update { current ->
+                        current.copy(
+                            backgroundSyncProviderId = provider.id,
+                            backgroundSyncProviderName = provider.name,
+                            backgroundSyncCompleted = index + 1,
+                            backgroundSyncTotal = total
+                        )
+                    }
+
+                    val fetched = FreeProxyProviderManager.fetchCandidates(provider, maxCandidates = 24)
+                    if (fetched is FreeProviderFetchResult.Success && fetched.candidates.isNotEmpty()) {
+                        val now = System.currentTimeMillis()
+                        val updatedCache = FreeProxyProviderCache.saveProviderUpdate(
+                            context = app,
+                            providerId = provider.id,
+                            profiles = fetched.candidates,
+                            updatedAtMillis = now
+                        )
+                        _freeProvidersState.update { it.copy(cachedEntries = updatedCache) }
+                    }
+
+                    // Gentle pacing between providers so it updates gradually
+                    if (index < toRefresh.lastIndex) {
+                        delay(3500L)
+                    }
+                }
+                TunnelTelemetryBus.appendLog("Background free proxy provider refresh completed")
+            } finally {
+                _freeProvidersState.update { current ->
+                    current.copy(
+                        backgroundSyncProviderId = null,
+                        backgroundSyncProviderName = null,
+                        backgroundSyncCompleted = 0,
+                        backgroundSyncTotal = 0
+                    )
+                }
+            }
+        }
+    }
+
+    private fun stopBackgroundFreeSync() {
+        backgroundFreeSyncJob?.cancel()
+        backgroundFreeSyncJob = null
+        _freeProvidersState.update { current ->
+            current.copy(
+                backgroundSyncProviderId = null,
+                backgroundSyncProviderName = null,
+                backgroundSyncCompleted = 0,
+                backgroundSyncTotal = 0
+            )
+        }
     }
 
     fun refreshExitIp() {

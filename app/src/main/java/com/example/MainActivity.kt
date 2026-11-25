@@ -175,6 +175,7 @@ fun NetShieldApp(
     val pingingIds by viewModel.pingingIds.collectAsStateWithLifecycle()
     val benchmarkState by viewModel.benchmarkState.collectAsStateWithLifecycle()
     val pingAllState by viewModel.pingAllState.collectAsStateWithLifecycle()
+    val freeProvidersState by viewModel.freeProvidersState.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
     val remoteUpdateState by viewModel.remoteUpdateState.collectAsStateWithLifecycle()
     val fcmToken by viewModel.fcmToken.collectAsStateWithLifecycle()
@@ -491,6 +492,8 @@ fun NetShieldApp(
                                             updatingSubscriptionIds = updatingSubIds,
                                             benchmarkState = benchmarkState,
                                             pingAllState = pingAllState,
+                                            freeProvidersState = freeProvidersState,
+                                            isFarsi = isFarsi,
                                             lowBatteryState = lowBatteryState,
                                             onSelectProfile = { id -> viewModel.selectProfile(id) },
                                             onSaveProfile = { profile -> viewModel.saveProfile(profile) },
@@ -525,7 +528,11 @@ fun NetShieldApp(
                                             onAutoConnectFastest = { fastest ->
                                                 requestVpnStart(fastest)
                                                 navigateTo(DashboardRoute)
-                                            }
+                                            },
+                                            onConnectFreeProvider = { provider, noServerMsg, onReady ->
+                                                viewModel.connectBestFromFreeProvider(provider, noServerMsg, onReady)
+                                            },
+                                            onCancelFreeProvider = { viewModel.cancelFreeProviderConnect() }
                                         )
                                     }
 

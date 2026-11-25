@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkPing
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Speed
@@ -81,8 +82,10 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +103,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.ConfigBackupManager
 import com.example.data.ExitIpChecker
+import com.example.data.FreeProxyProvider
 import com.example.data.LatencyTier
 import com.example.data.UriConfigParser
 import com.example.model.LoadBalanceStrategy
@@ -112,6 +116,7 @@ import com.example.model.countryCodeToFlag
 import com.example.ui.BackupImportStatus
 import com.example.ui.BenchmarkUiState
 import com.example.ui.ClipboardPasteOutcome
+import com.example.ui.FreeProvidersUiState
 import com.example.ui.PingAllUiState
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
@@ -131,6 +136,8 @@ fun ServersScreen(
     updatingSubscriptionIds: Set<Long> = emptySet(),
     benchmarkState: BenchmarkUiState,
     pingAllState: PingAllUiState = PingAllUiState(),
+    freeProvidersState: FreeProvidersUiState = FreeProvidersUiState(),
+    isFarsi: Boolean = true,
     lowBatteryState: LowBatteryState = LowBatteryState(),
     onSelectProfile: (Long) -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
@@ -149,10 +156,13 @@ fun ServersScreen(
     onTestAllServers: (List<VpnProfile>, Boolean, (VpnProfile) -> Unit) -> Unit,
     onStopBenchmarking: () -> Unit,
     onAutoConnectFastest: (VpnProfile) -> Unit,
+    onConnectFreeProvider: (FreeProxyProvider, String, (VpnProfile) -> Unit) -> Unit = { _, _, _ -> },
+    onCancelFreeProvider: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val isLowBatteryActive = lowBatteryState.isLowBatteryActive
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var selectedFilter by remember { mutableStateOf<ProtocolGroup?>(null) }
     var sortByFastest by remember { mutableStateOf(false) }
     var didAutoPingOnOpen by remember { mutableStateOf(false) }
@@ -238,41 +248,43 @@ fun ServersScreen(
         modifier = modifier.fillMaxSize(),
         containerColor = Color.Transparent,
         floatingActionButton = {
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                FloatingActionButton(
-                    onClick = {
-                        editingProfile = null
-                        defaultNewProtocol = VpnProtocol.LOAD_BALANCE
-                        showEditorSheet = true
-                    },
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                    modifier = Modifier.testTag("add_load_balance_fab")
+            if (selectedTab == 0) {
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(Icons.Filled.Hub, contentDescription = strings.createLoadBalance)
-                }
-                FloatingActionButton(
-                    onClick = { showImportDialog = true },
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.testTag("import_uri_fab")
-                ) {
-                    Icon(Icons.Filled.Link, contentDescription = strings.importFromLink)
-                }
-                FloatingActionButton(
-                    onClick = {
-                        editingProfile = null
-                        defaultNewProtocol = VpnProtocol.VLESS
-                        showEditorSheet = true
-                    },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.testTag("add_server_fab")
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = strings.addServer)
+                    FloatingActionButton(
+                        onClick = {
+                            editingProfile = null
+                            defaultNewProtocol = VpnProtocol.LOAD_BALANCE
+                            showEditorSheet = true
+                        },
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.testTag("add_load_balance_fab")
+                    ) {
+                        Icon(Icons.Filled.Hub, contentDescription = strings.createLoadBalance)
+                    }
+                    FloatingActionButton(
+                        onClick = { showImportDialog = true },
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.testTag("import_uri_fab")
+                    ) {
+                        Icon(Icons.Filled.Link, contentDescription = strings.importFromLink)
+                    }
+                    FloatingActionButton(
+                        onClick = {
+                            editingProfile = null
+                            defaultNewProtocol = VpnProtocol.VLESS
+                            showEditorSheet = true
+                        },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.testTag("add_server_fab")
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = strings.addServer)
+                    }
                 }
             }
         }
@@ -304,7 +316,7 @@ fun ServersScreen(
                         modifier = Modifier.weight(1f)
                     )
 
-                    if (filteredProfiles.isNotEmpty()) {
+                    if (selectedTab == 0 && filteredProfiles.isNotEmpty()) {
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -364,6 +376,116 @@ fun ServersScreen(
                     }
                 }
 
+                // Segmented 2-Tab Bar: My Servers | Free Proxies
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.62f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.36f)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val mySelected = selectedTab == 0
+                        Surface(
+                            color = if (mySelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            contentColor = if (mySelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedTab = 0 }
+                                .minimumInteractiveComponentSize()
+                                .testTag("servers_tab_my_servers")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Dns,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = strings.serversTabMyServers,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = if (mySelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        val freeSelected = selectedTab == 1
+                        Surface(
+                            color = if (freeSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            contentColor = if (freeSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedTab = 1 }
+                                .minimumInteractiveComponentSize()
+                                .testTag("servers_tab_free_providers")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Public,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = strings.serversTabFreeProviders,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = if (freeSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (selectedTab == 1) {
+                    FreeProvidersTab(
+                        strings = strings,
+                        isFarsi = isFarsi,
+                        state = freeProvidersState,
+                        onSelectProvider = { provider ->
+                            onConnectFreeProvider(
+                                provider,
+                                strings.freeProviderNoWorkingServerMsg(provider.name)
+                            ) { bestProfile ->
+                                val ms = bestProfile.latencyMs ?: 0
+                                Toast.makeText(
+                                    context,
+                                    strings.freeProviderConnectedToast(provider.name, ms),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                onAutoConnectFastest(bestProfile)
+                            }
+                        },
+                        onCancel = onCancelFreeProvider,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
                 // Primary Quick Actions: 1-Tap Clipboard Paste + Subscriptions
                 Row(
                     modifier = Modifier
@@ -650,6 +772,7 @@ fun ServersScreen(
                         }
                     }
                 }
+                } // end else (selectedTab == 0)
             }
         }
     }

@@ -7,12 +7,14 @@ import android.util.Base64
 import com.example.model.TransportType
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
+import com.example.vpn.protocols.ShadowsocksConnector
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.UUID
 
 object UriConfigParser {
 
@@ -55,6 +57,29 @@ object UriConfigParser {
         return emptyList()
     }
 
+    fun parseCompatibleBatch(rawText: String): List<VpnProfile> {
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) return emptyList()
+
+        if (trimmed.startsWith("{") && trimmed.contains("\"add\"") && trimmed.contains("\"id\"")) {
+            val profile = parseRawVmessJson(trimmed) ?: return emptyList()
+            return if (isVmessJsonCompatible(trimmed, profile)) listOf(profile) else emptyList()
+        }
+
+        val direct = parseCompatibleLines(trimmed)
+        if (direct.isNotEmpty()) return direct
+
+        val compact = trimmed.replace("\n", "").replace("\r", "").trim()
+        if (compact.length >= 12 && !compact.contains("://")) {
+            val decoded = decodeBase64Flexible(compact)
+            if (!decoded.isNullOrBlank() && KNOWN_SCHEMES.any { decoded.contains(it, ignoreCase = true) }) {
+                val decodedProfiles = parseCompatibleLines(decoded)
+                if (decodedProfiles.isNotEmpty()) return decodedProfiles
+            }
+        }
+        return emptyList()
+    }
+
     private fun parseLines(text: String): List<VpnProfile> {
         return text
             .lineSequence()
@@ -63,6 +88,115 @@ object UriConfigParser {
             .mapNotNull { parseSingle(it) }
             .toList()
     }
+
+    private fun parseCompatibleLines(text: String): List<VpnProfile> {
+        return text
+            .lineSequence()
+            .map { extractSchemeCandidate(it.trim()) }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { candidate ->
+                val profile = parseSingle(candidate) ?: return@mapNotNull null
+                if (isConnectorCompatible(candidate, profile)) profile else null
+            }
+            .toList()
+    }
+
+    /**
+     * Checks whether a parsed URI is genuinely supported by Baldr VPN's native connectors
+     * (prevents selecting Reality / XTLS-Vision / gRPC / HTTPUpgrade / xHTTP / SS-2022 / legacy CFB
+     * nodes that establish a decoy TCP/TLS socket and drop all tunneled RX traffic).
+     */
+    fun isConnectorCompatible(rawUri: String, profile: VpnProfile): Boolean {
+        val cleanUri = rawUri.trim().replace("&amp;", "&")
+        return when (profile.protocol) {
+            VpnProtocol.VLESS -> {
+                if (!isValidUuid(profile.usernameOrUuid)) return false
+                val params = parseQueryParamsCaseInsensitive(cleanUri)
+                val security = params["security"].orEmpty().lowercase()
+                if (security == "reality" || params.containsKey("pbk") || params.containsKey("sid")) return false
+                val flow = params["flow"].orEmpty().lowercase()
+                if (flow.isNotBlank() && flow != "none") return false
+                val encryption = params["encryption"].orEmpty().lowercase()
+                if (encryption.isNotBlank() && encryption != "none") return false
+                val type = params["type"].orEmpty().lowercase()
+                if (type.isNotBlank() && type !in SUPPORTED_TRANSFORMS) return false
+                val headerType = params["headertype"].orEmpty().lowercase()
+                if (headerType == "http") return false
+                // Reject corrupted paths where query params were glued without '&'
+                if (profile.transport == TransportType.WS &&
+                    (profile.wsPath.contains("fp=") || profile.wsPath.contains("security="))
+                ) return false
+                true
+            }
+            VpnProtocol.VMESS -> {
+                if (!isValidUuid(profile.usernameOrUuid)) return false
+                if (profile.alterId > 0) return false
+                val encoded = cleanUri.substringAfter("://", "").substringBefore("#").trim()
+                val decoded = if (encoded.startsWith("{")) encoded else decodeBase64Flexible(encoded)
+                if (decoded != null) {
+                    isVmessJsonCompatible(decoded, profile)
+                } else {
+                    true
+                }
+            }
+            VpnProtocol.TROJAN -> {
+                if (profile.passwordOrSecret.isBlank()) return false
+                val params = parseQueryParamsCaseInsensitive(cleanUri)
+                val security = params["security"].orEmpty().lowercase()
+                if (security == "reality" || params.containsKey("pbk")) return false
+                val type = params["type"].orEmpty().lowercase()
+                if (type.isNotBlank() && type !in SUPPORTED_TRANSFORMS) return false
+                val headerType = params["headertype"].orEmpty().lowercase()
+                if (headerType == "http") return false
+                true
+            }
+            VpnProtocol.SHADOWSOCKS -> {
+                if (!ShadowsocksConnector.isSupportedCipher(profile.cipher)) return false
+                if (profile.passwordOrSecret.isBlank()) return false
+                val params = parseQueryParamsCaseInsensitive(cleanUri)
+                if (params.containsKey("plugin") || params.containsKey("pbk") || params["security"] == "reality") {
+                    return false
+                }
+                true
+            }
+            else -> true
+        }
+    }
+
+    private fun isVmessJsonCompatible(jsonStr: String, profile: VpnProfile): Boolean {
+        if (!isValidUuid(profile.usernameOrUuid)) return false
+        if (profile.alterId > 0) return false
+        val json = runCatching { JSONObject(jsonStr) }.getOrNull() ?: return false
+        val net = json.optString("net", "tcp").trim().lowercase()
+        if (net.isNotBlank() && net !in SUPPORTED_TRANSFORMS) return false
+        val headerType = json.optString("type", "none").trim().lowercase()
+        if (headerType == "http") return false
+        return true
+    }
+
+    private fun isValidUuid(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.length < 32) return false
+        return runCatching { UUID.fromString(trimmed) }.isSuccess
+    }
+
+    private fun parseQueryParamsCaseInsensitive(uri: String): Map<String, String> {
+        val withoutFragment = uri.substringBefore("#")
+        val query = withoutFragment.substringAfter("?", "")
+        if (query.isBlank()) return emptyMap()
+        val result = LinkedHashMap<String, String>()
+        for (pair in query.split("&")) {
+            if (pair.isBlank()) continue
+            val key = pair.substringBefore("=").trim().lowercase()
+            val value = pair.substringAfter("=", "").trim()
+            if (key.isNotEmpty() && !result.containsKey(key)) {
+                result[key] = decodeUrl(value)
+            }
+        }
+        return result
+    }
+
+    private val SUPPORTED_TRANSFORMS = setOf("tcp", "raw", "ws", "websocket")
 
     private fun extractSchemeCandidate(line: String): String {
         if (line.isEmpty()) return ""
@@ -92,7 +226,7 @@ object UriConfigParser {
     }
 
     fun parseSingle(rawUri: String): VpnProfile? {
-        val trimmed = extractSchemeCandidate(rawUri.trim())
+        val trimmed = extractSchemeCandidate(rawUri.trim().replace("&amp;", "&"))
         return runCatching {
             when {
                 trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
@@ -142,14 +276,18 @@ object UriConfigParser {
         }
         val scy = json.optString("scy", "auto").ifBlank { "auto" }
         val allowInsecure = json.optBoolean("allowInsecure", false) ||
-            json.optString("allowInsecure") == "1"
+            json.optString("allowInsecure") == "1" ||
+            json.optBoolean("skip-cert-verify", false) ||
+            json.optString("skip-cert-verify").equals("true", ignoreCase = true) ||
+            json.optBoolean("insecure", false) ||
+            json.optString("insecure") == "1"
         return VpnProfile(
             name = ps,
             protocol = VpnProtocol.VMESS,
             host = host,
             port = port,
             usernameOrUuid = uuid,
-            transport = if (net == "ws") TransportType.WS else TransportType.TCP,
+            transport = if (net == "ws" || net == "websocket") TransportType.WS else TransportType.TCP,
             tlsEnabled = tls,
             sni = sni,
             wsHost = wsHost,
@@ -166,15 +304,20 @@ object UriConfigParser {
         val host = parsed.host?.trim().orEmpty()
         val port = if (parsed.port > 0) parsed.port else 443
         if (host.isEmpty() || uuid.isEmpty()) return null
-        val type = parsed.getQueryParameter("type")?.lowercase() ?: "tcp"
-        val security = parsed.getQueryParameter("security")?.lowercase() ?: "none"
-        val tlsFlag = parsed.getQueryParameter("tls")?.lowercase()
+        val params = parseQueryParamsCaseInsensitive(uri)
+        val type = params["type"]?.lowercase() ?: "tcp"
+        val security = params["security"]?.lowercase() ?: "none"
+        val tlsFlag = params["tls"]?.lowercase()
         val tlsEnabled = security == "tls" || security == "reality" || tlsFlag == "1" || tlsFlag == "true"
-        val sni = parsed.getQueryParameter("sni").orEmpty()
-        val wsHost = parsed.getQueryParameter("host").orEmpty()
-        val wsPath = parsed.getQueryParameter("path")?.let { decodeUrl(it) }.orEmpty().ifBlank { "/" }
-        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1" ||
-            parsed.getQueryParameter("insecure") == "1"
+        val wsHost = params["host"].orEmpty()
+        val sni = params["sni"].orEmpty().ifBlank { params["peer"].orEmpty() }.ifBlank {
+            if (tlsEnabled) wsHost else ""
+        }
+        val wsPath = params["path"].orEmpty().ifBlank { "/" }
+        val allowInsecure = params["allowinsecure"] == "1" ||
+            params["allowinsecure"].equals("true", ignoreCase = true) ||
+            params["insecure"] == "1" ||
+            params["insecure"].equals("true", ignoreCase = true)
         val name = parsed.fragment?.let { decodeUrl(it) }?.ifBlank { null } ?: "$host:$port"
         return VpnProfile(
             name = name,
@@ -182,7 +325,7 @@ object UriConfigParser {
             host = host,
             port = port,
             usernameOrUuid = uuid,
-            transport = if (type == "ws") TransportType.WS else TransportType.TCP,
+            transport = if (type == "ws" || type == "websocket") TransportType.WS else TransportType.TCP,
             tlsEnabled = tlsEnabled,
             sni = sni,
             wsHost = wsHost,
@@ -197,12 +340,17 @@ object UriConfigParser {
         val host = parsed.host?.trim().orEmpty()
         val port = if (parsed.port > 0) parsed.port else 443
         if (host.isEmpty() || password.isEmpty()) return null
-        val type = parsed.getQueryParameter("type")?.lowercase() ?: "tcp"
-        val sni = parsed.getQueryParameter("sni").orEmpty()
-        val wsHost = parsed.getQueryParameter("host").orEmpty()
-        val wsPath = parsed.getQueryParameter("path")?.let { decodeUrl(it) }.orEmpty().ifBlank { "/" }
-        val allowInsecure = parsed.getQueryParameter("allowInsecure") == "1" ||
-            parsed.getQueryParameter("insecure") == "1"
+        val params = parseQueryParamsCaseInsensitive(uri)
+        val type = params["type"]?.lowercase() ?: "tcp"
+        val security = params["security"]?.lowercase()
+        val tlsEnabled = security != "none"
+        val wsHost = params["host"].orEmpty()
+        val sni = params["sni"].orEmpty().ifBlank { params["peer"].orEmpty() }.ifBlank { wsHost }
+        val wsPath = params["path"].orEmpty().ifBlank { "/" }
+        val allowInsecure = params["allowinsecure"] == "1" ||
+            params["allowinsecure"].equals("true", ignoreCase = true) ||
+            params["insecure"] == "1" ||
+            params["insecure"].equals("true", ignoreCase = true)
         val name = parsed.fragment?.let { decodeUrl(it) }?.ifBlank { null } ?: "$host:$port"
         return VpnProfile(
             name = name,
@@ -210,8 +358,8 @@ object UriConfigParser {
             host = host,
             port = port,
             passwordOrSecret = password,
-            transport = if (type == "ws") TransportType.WS else TransportType.TCP,
-            tlsEnabled = true,
+            transport = if (type == "ws" || type == "websocket") TransportType.WS else TransportType.TCP,
+            tlsEnabled = tlsEnabled,
             sni = sni.ifBlank { host },
             wsHost = wsHost,
             wsPath = wsPath,

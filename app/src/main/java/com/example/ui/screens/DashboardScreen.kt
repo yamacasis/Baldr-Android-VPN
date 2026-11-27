@@ -1,19 +1,18 @@
 package com.example.ui.screens
 
+import android.app.StatusBarManager
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,19 +33,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatterySaver
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GppGood
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
@@ -71,18 +72,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -106,16 +104,22 @@ import com.example.model.TrafficStatsSnapshot
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
 import com.example.model.countryCodeToFlag
+import com.example.ui.components.ConnectPowerButton
 import com.example.ui.components.SpeedSparklineChart
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
 import com.example.ui.theme.BaldrGold
+import com.example.ui.theme.ConnectedGreen
+import com.example.ui.theme.ConnectingOrange
 import com.example.ui.theme.CoralError
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LapisEmblemBg
+import com.example.ui.theme.NavyShadow
+import com.example.vpn.BaldrQuickTileService
 import com.example.vpn.LowBatteryState
 import com.example.vpn.formatBytes
 import com.example.vpn.formatRate
+import com.example.widget.BaldrVpnWidgetProvider
 import kotlinx.coroutines.delay
 
 @Composable
@@ -146,7 +150,14 @@ fun DashboardScreen(
     val context = LocalContext.current
     val displayProfile = activeProfile ?: selectedProfile
     val isLowBatteryActive = lowBatteryState.isLowBatteryActive
+    val isConnected = connectionState == ConnectionState.CONNECTED
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var isServerAndSpeedExpanded by rememberSaveable { mutableStateOf(false) }
+    var isProtectionExpanded by rememberSaveable { mutableStateOf(!isConnected) }
+
+    LaunchedEffect(isConnected) {
+        isProtectionExpanded = !isConnected
+    }
 
     LaunchedEffect(connectionState, isLowBatteryActive) {
         if (connectionState == ConnectionState.CONNECTED) {
@@ -172,10 +183,10 @@ fun DashboardScreen(
 
     val statusColor by animateColorAsState(
         targetValue = when (connectionState) {
-            ConnectionState.CONNECTED -> MaterialTheme.colorScheme.primary
-            ConnectionState.CONNECTING, ConnectionState.RECONNECTING, ConnectionState.DISCONNECTING -> AmberStatus
+            ConnectionState.CONNECTED -> ConnectedGreen
+            ConnectionState.CONNECTING, ConnectionState.RECONNECTING, ConnectionState.DISCONNECTING -> ConnectingOrange
             ConnectionState.FIREWALL_LOCKED, ConnectionState.ERROR -> CoralError
-            ConnectionState.DISCONNECTED -> MaterialTheme.colorScheme.onSurfaceVariant
+            ConnectionState.DISCONNECTED -> MaterialTheme.colorScheme.primary
         },
         animationSpec = spring(),
         label = "status_color"
@@ -308,12 +319,19 @@ fun DashboardScreen(
             Card(
                 shape = RoundedCornerShape(28.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
                     contentColor = MaterialTheme.colorScheme.onSurface
                 ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.48f else 0.55f)),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(
+                        elevation = 12.dp,
+                        shape = RoundedCornerShape(28.dp),
+                        ambientColor = NavyShadow,
+                        spotColor = NavyShadow
+                    )
             ) {
                 Column(
                     modifier = Modifier
@@ -444,445 +462,41 @@ fun DashboardScreen(
                         }
                     }
 
-                    // Connect Power Button with Lightweight Connected Effect
-                    val isConnected = connectionState == ConnectionState.CONNECTED
-                    val isActiveState = isConnected ||
-                        connectionState == ConnectionState.CONNECTING ||
-                        connectionState == ConnectionState.RECONNECTING
-
-                    val effectStrength by animateFloatAsState(
-                        targetValue = if (isConnected) 1f else 0f,
-                        animationSpec = tween(420),
-                        label = "connected_effect_strength"
-                    )
-
-                    val connectedSweep: Float
-                    val connectedWave1: Float
-                    val connectedWave2: Float
-                    val pulseScale: Float
-
-                    if (isActiveState && !isLowBatteryActive) {
-                        val infiniteTransition = rememberInfiniteTransition(label = "vpn_active_fx")
-                        val pScale by infiniteTransition.animateFloat(
-                            initialValue = 1f,
-                            targetValue = 1.07f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(1600, easing = FastOutSlowInEasing),
-                                repeatMode = RepeatMode.Reverse
-                            ),
-                            label = "pulse_scale"
-                        )
-                        val sweep by infiniteTransition.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 360f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(3600, easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            ),
-                            label = "ring_sweep"
-                        )
-                        val wave1 by infiniteTransition.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(2200, easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            ),
-                            label = "wave1"
-                        )
-                        pulseScale = pScale
-                        connectedSweep = sweep
-                        connectedWave1 = wave1
-                        connectedWave2 = (wave1 + 0.5f) % 1f
-                    } else {
-                        pulseScale = 1f
-                        connectedSweep = 0f
-                        connectedWave1 = 0f
-                        connectedWave2 = 0f
+                    // Connect Power Button:
+                    // - Before connecting: full-size centered orb, NO speed chart.
+                    // - When connected: compact green orb beside the live speed chart.
+                    val buttonContentDesc = when (connectionState) {
+                        ConnectionState.CONNECTED -> strings.tapToDisconnect
+                        ConnectionState.FIREWALL_LOCKED -> strings.tapToUnlockFirewall
+                        else -> strings.tapToConnect
                     }
 
-                    val primaryColor = MaterialTheme.colorScheme.primary
-                    val secondaryLapis = MaterialTheme.colorScheme.secondary
-                    val goldColor = BaldrGold
-
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    ) {
-                        // Ultra-lightweight Canvas halo + staggered ripples + rotating orbital arc when connected
-                        if (effectStrength > 0.01f || isActiveState) {
-                            Canvas(
-                                modifier = Modifier
-                                    .size(182.dp)
-                                    .testTag("connected_visual_effect")
-                            ) {
-                                val center = Offset(size.width / 2f, size.height / 2f)
-                                val baseRadius = 58.dp.toPx()
-                                val maxRadius = size.minDimension / 2f
-
-                                if (effectStrength > 0.01f) {
-                                    // Soft radial aura blending Jade + Lapis Lazuli + Gold
-                                    drawCircle(
-                                        brush = Brush.radialGradient(
-                                            colors = listOf(
-                                                primaryColor.copy(alpha = 0.24f * effectStrength),
-                                                secondaryLapis.copy(alpha = 0.18f * effectStrength),
-                                                goldColor.copy(alpha = 0.08f * effectStrength),
-                                                Color.Transparent
-                                            ),
-                                            center = center,
-                                            radius = maxRadius
-                                        ),
-                                        radius = maxRadius,
-                                        center = center
-                                    )
-
-                                    // Two lightweight expanding shield rings (Jade + Lapis Lazuli)
-                                    val r1 = baseRadius + (maxRadius - baseRadius) * connectedWave1
-                                    val a1 = (1f - connectedWave1) * 0.42f * effectStrength
-                                    drawCircle(
-                                        color = primaryColor.copy(alpha = a1),
-                                        radius = r1,
-                                        center = center,
-                                        style = Stroke(width = 2.dp.toPx())
-                                    )
-
-                                    val r2 = baseRadius + (maxRadius - baseRadius) * connectedWave2
-                                    val a2 = (1f - connectedWave2) * 0.38f * effectStrength
-                                    drawCircle(
-                                        color = secondaryLapis.copy(alpha = a2),
-                                        radius = r2,
-                                        center = center,
-                                        style = Stroke(width = 1.8.dp.toPx())
-                                    )
-
-                                    // Subtle rotating orbital arcs (Baldr Gold + Lapis Lazuli)
-                                    val arcDiameter = baseRadius * 2.26f
-                                    val topLeft = Offset(
-                                        center.x - arcDiameter / 2f,
-                                        center.y - arcDiameter / 2f
-                                    )
-                                    drawArc(
-                                        color = goldColor.copy(alpha = 0.68f * effectStrength),
-                                        startAngle = connectedSweep,
-                                        sweepAngle = 64f,
-                                        useCenter = false,
-                                        topLeft = topLeft,
-                                        size = Size(arcDiameter, arcDiameter),
-                                        style = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round)
-                                    )
-                                    drawArc(
-                                        color = secondaryLapis.copy(alpha = 0.52f * effectStrength),
-                                        startAngle = connectedSweep + 180f,
-                                        sweepAngle = 48f,
-                                        useCenter = false,
-                                        topLeft = topLeft,
-                                        size = Size(arcDiameter, arcDiameter),
-                                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-                                    )
-                                }
-                            }
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .size(142.dp)
-                                .scale(pulseScale)
-                                .clip(CircleShape)
-                                .background(statusColor.copy(alpha = 0.14f))
-                        )
-                        Surface(
-                            shape = CircleShape,
-                            color = when (connectionState) {
-                                ConnectionState.CONNECTED -> MaterialTheme.colorScheme.primary
-                                ConnectionState.CONNECTING, ConnectionState.RECONNECTING, ConnectionState.DISCONNECTING -> AmberStatus
-                                ConnectionState.FIREWALL_LOCKED -> CoralError
-                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
-                            },
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                            tonalElevation = 0.dp,
-                            shadowElevation = if (isConnected) 6.dp else 0.dp,
-                            modifier = Modifier
-                                .size(116.dp)
-                                .clip(CircleShape)
-                                .border(
-                                    width = if (isConnected) 2.5.dp else 2.dp,
-                                    color = if (isConnected) BaldrGold.copy(alpha = 0.85f) else statusColor.copy(alpha = 0.7f),
-                                    shape = CircleShape
-                                )
-                                .clickable(onClick = onToggleConnection)
-                                .testTag("vpn_connect_button")
+                    if (isConnected) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (connectionState == ConnectionState.CONNECTING ||
-                                    connectionState == ConnectionState.RECONNECTING ||
-                                    connectionState == ConnectionState.DISCONNECTING
-                                ) {
-                                    CircularProgressIndicator(
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        strokeWidth = 3.dp,
-                                        modifier = Modifier.size(44.dp)
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Filled.PowerSettingsNew,
-                                        contentDescription = when (connectionState) {
-                                            ConnectionState.CONNECTED -> strings.tapToDisconnect
-                                            ConnectionState.FIREWALL_LOCKED -> strings.tapToUnlockFirewall
-                                            else -> strings.tapToConnect
-                                        },
-                                        tint = if (connectionState == ConnectionState.CONNECTED ||
-                                            connectionState == ConnectionState.FIREWALL_LOCKED
-                                        ) {
-                                            MaterialTheme.colorScheme.onPrimary
-                                        } else {
-                                            MaterialTheme.colorScheme.primary
-                                        },
-                                        modifier = Modifier.size(48.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
+                            ConnectPowerButton(
+                                connectionState = connectionState,
+                                isLowBatteryActive = isLowBatteryActive,
+                                contentDescription = buttonContentDesc,
+                                onToggleConnection = onToggleConnection,
+                                compact = true
+                            )
 
-                        Text(
-                            text = when {
-                                connectionState == ConnectionState.FIREWALL_LOCKED -> strings.tapToUnlockFirewall
-                                displayProfile == null -> strings.selectServerPrompt
-                                connectionState == ConnectionState.CONNECTED ||
-                                    connectionState == ConnectionState.RECONNECTING -> strings.tapToDisconnect
-                                else -> strings.tapToConnect
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        // Live Speed Chart directly below the Connect button
-                        Surface(
-                            shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("dashboard_speed_chart")
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.ArrowDownward,
-                                                contentDescription = strings.downloadSpeed,
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                            Text(
-                                                text = formatRate(trafficStats.downloadSpeedBps),
-                                                fontFamily = JetBrainsMonoFamily,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        }
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.ArrowUpward,
-                                                contentDescription = strings.uploadSpeed,
-                                                tint = MaterialTheme.colorScheme.secondary,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                            Text(
-                                                text = formatRate(trafficStats.uploadSpeedBps),
-                                                fontFamily = JetBrainsMonoFamily,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.secondary
-                                            )
-                                        }
-                                    }
-                                    Text(
-                                        text = durationText,
-                                        fontFamily = JetBrainsMonoFamily,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-
-                                SpeedSparklineChart(
-                                    samples = trafficStats.speedHistory,
-                                    modifier = Modifier.height(78.dp)
-                                )
-                            }
-                        }
-
-                        // Live Speed & Traffic right after the Speed Chart
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("traffic_stats_card"),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                StatTile(
-                                    label = strings.downloadSpeed,
-                                    value = formatRate(trafficStats.downloadSpeedBps),
-                                    icon = Icons.Filled.ArrowDownward,
-                                    accent = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                StatTile(
-                                    label = strings.uploadSpeed,
-                                    value = formatRate(trafficStats.uploadSpeedBps),
-                                    icon = Icons.Filled.ArrowUpward,
-                                    accent = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                StatTile(
-                                    label = strings.totalDownloaded,
-                                    value = formatBytes(trafficStats.totalDownloadedBytes),
-                                    icon = Icons.Filled.Shield,
-                                    accent = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                StatTile(
-                                    label = strings.totalUploaded,
-                                    value = formatBytes(trafficStats.totalUploadedBytes),
-                                    icon = Icons.Filled.Lock,
-                                    accent = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-
-                        // Active Server Selector Chip
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.26f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .clickable(onClick = onNavigateToServers)
-                                .testTag("active_server_selector")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .padding(horizontal = 14.dp, vertical = 12.dp)
-                                    .fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Dns,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                    Column {
-                                        Text(
-                                            text = displayProfile?.name ?: strings.noProfileSelected,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (displayProfile != null) {
-                                            Text(
-                                                text = "${displayProfile.host}:${displayProfile.port}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                                if (displayProfile != null) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        val ms = displayProfile.latencyMs
-                                        if (ms != null) {
-                                            val tier = ExitIpChecker.classifyLatency(ms)
-                                            val pingColor = when (tier) {
-                                                LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primary
-                                                LatencyTier.FAIR -> AmberStatus
-                                                else -> CoralError
-                                            }
-                                            Surface(
-                                                color = pingColor.copy(alpha = 0.14f),
-                                                shape = RoundedCornerShape(8.dp),
-                                                modifier = Modifier.testTag("dashboard_server_latency")
-                                            ) {
-                                                Text(
-                                                    text = if (ms > 0) strings.latencyMs(ms) else strings.pingTimeoutLabel,
-                                                    fontFamily = JetBrainsMonoFamily,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = pingColor,
-                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
-                                                )
-                                            }
-                                        }
-                                        Surface(
-                                            color = MaterialTheme.colorScheme.secondaryContainer,
-                                            shape = RoundedCornerShape(8.dp)
-                                        ) {
-                                            Text(
-                                                text = displayProfile.protocol.shortBadge,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Dual-VPN Active + Standby Live Control Strip (when connected via Multi-Mode)
-                        if (connectionState == ConnectionState.CONNECTED && multiTunnelStatus.isMultiMode) {
                             Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.28f),
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
                                 contentColor = MaterialTheme.colorScheme.onSurface,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.42f)),
+                                border = BorderStroke(1.dp, ConnectedGreen.copy(alpha = 0.36f)),
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("dual_vpn_status_card")
+                                    .weight(1f)
+                                    .testTag("dashboard_speed_chart")
                             ) {
                                 Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -891,75 +505,409 @@ fun DashboardScreen(
                                     ) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            modifier = Modifier.weight(1f)
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Hub,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.tertiary,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Text(
-                                                text = strings.dualVpnTitle,
-                                                style = MaterialTheme.typography.labelLarge,
-                                                fontWeight = FontWeight.SemiBold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            if (multiTunnelStatus.switchCount > 0) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.ArrowDownward,
+                                                    contentDescription = strings.downloadSpeed,
+                                                    tint = ConnectedGreen,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
                                                 Text(
-                                                    text = "• ${strings.multiTunnelSwitchesCount(multiTunnelStatus.switchCount)}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    text = formatRate(trafficStats.downloadSpeedBps),
+                                                    fontFamily = JetBrainsMonoFamily,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ConnectedGreen,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.ArrowUpward,
+                                                    contentDescription = strings.uploadSpeed,
+                                                    tint = MaterialTheme.colorScheme.secondary,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                                Text(
+                                                    text = formatRate(trafficStats.uploadSpeedBps),
+                                                    fontFamily = JetBrainsMonoFamily,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.secondary,
                                                     maxLines = 1
                                                 )
                                             }
                                         }
-                                        if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
-                                            FilledTonalButton(
-                                                onClick = onSwitchMultiNode,
-                                                modifier = Modifier
-                                                    .minimumInteractiveComponentSize()
-                                                    .testTag("switch_multi_vpn_button")
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.SwapHoriz,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                                Spacer(modifier = Modifier.size(4.dp))
+                                        Text(
+                                            text = durationText,
+                                            fontFamily = JetBrainsMonoFamily,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1
+                                        )
+                                    }
+
+                                    SpeedSparklineChart(
+                                        samples = trafficStats.speedHistory,
+                                        modifier = Modifier.height(64.dp)
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        ConnectPowerButton(
+                            connectionState = connectionState,
+                            isLowBatteryActive = isLowBatteryActive,
+                            contentDescription = buttonContentDesc,
+                            onToggleConnection = onToggleConnection,
+                            compact = false
+                        )
+                    }
+
+                    Text(
+                        text = when {
+                            connectionState == ConnectionState.FIREWALL_LOCKED -> strings.tapToUnlockFirewall
+                            displayProfile == null -> strings.selectServerPrompt
+                            connectionState == ConnectionState.CONNECTED ||
+                                connectionState == ConnectionState.RECONNECTING -> strings.tapToDisconnect
+                            else -> strings.tapToConnect
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Collapsible Server Info & Download/Upload Speed Details (collapsed by default; tap to expand)
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isConnected) ConnectedGreen.copy(alpha = 0.34f)
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.40f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { isServerAndSpeedExpanded = !isServerAndSpeedExpanded }
+                            .minimumInteractiveComponentSize()
+                            .testTag("server_speed_collapse_header")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .padding(horizontal = 14.dp, vertical = 11.dp)
+                                .fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Dns,
+                                    contentDescription = null,
+                                    tint = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.primary
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = displayProfile?.name ?: strings.noProfileSelected,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (isConnected) {
+                                            "↓ ${formatRate(trafficStats.downloadSpeedBps)} · ↑ ${formatRate(trafficStats.uploadSpeedBps)}"
+                                        } else {
+                                            strings.serverSpeedDetailsTitle
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (displayProfile != null) {
+                                    Surface(
+                                        color = if (isConnected) {
+                                            ConnectedGreen.copy(alpha = 0.16f)
+                                        } else {
+                                            MaterialTheme.colorScheme.secondaryContainer
+                                        },
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text(
+                                            text = displayProfile.protocol.shortBadge,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = if (isServerAndSpeedExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = strings.serverSpeedDetailsTitle,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    AnimatedVisibility(
+                        visible = isServerAndSpeedExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            // Live Speed & Traffic tiles
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("traffic_stats_card"),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    StatTile(
+                                        label = strings.downloadSpeed,
+                                        value = formatRate(trafficStats.downloadSpeedBps),
+                                        icon = Icons.Filled.ArrowDownward,
+                                        accent = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    StatTile(
+                                        label = strings.uploadSpeed,
+                                        value = formatRate(trafficStats.uploadSpeedBps),
+                                        icon = Icons.Filled.ArrowUpward,
+                                        accent = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    StatTile(
+                                        label = strings.totalDownloaded,
+                                        value = formatBytes(trafficStats.totalDownloadedBytes),
+                                        icon = Icons.Filled.Shield,
+                                        accent = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    StatTile(
+                                        label = strings.totalUploaded,
+                                        value = formatBytes(trafficStats.totalUploadedBytes),
+                                        icon = Icons.Filled.Lock,
+                                        accent = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+
+                            // Active Server Selector Chip (tap to switch server)
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.58f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.40f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable(onClick = onNavigateToServers)
+                                    .testTag("active_server_selector")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                        .fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Dns,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Column {
+                                            Text(
+                                                text = displayProfile?.name ?: strings.noProfileSelected,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (displayProfile != null) {
                                                 Text(
-                                                    text = strings.switchVpnNowButton,
-                                                    style = MaterialTheme.typography.labelMedium
+                                                    text = "${displayProfile.host}:${displayProfile.port}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
                                         }
                                     }
+                                    if (displayProfile != null) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            val ms = displayProfile.latencyMs
+                                            if (ms != null) {
+                                                val tier = ExitIpChecker.classifyLatency(ms)
+                                                val pingColor = when (tier) {
+                                                    LatencyTier.EXCELLENT, LatencyTier.GOOD -> ConnectedGreen
+                                                    LatencyTier.FAIR -> AmberStatus
+                                                    else -> CoralError
+                                                }
+                                                Surface(
+                                                    color = pingColor.copy(alpha = 0.14f),
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    modifier = Modifier.testTag("dashboard_server_latency")
+                                                ) {
+                                                    Text(
+                                                        text = if (ms > 0) strings.latencyMs(ms) else strings.pingTimeoutLabel,
+                                                        fontFamily = JetBrainsMonoFamily,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = pingColor,
+                                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                                    )
+                                                }
+                                            }
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) {
+                                                Text(
+                                                    text = displayProfile.protocol.shortBadge,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            // Dual-VPN Active + Standby Live Control Strip (when connected via Multi-Mode)
+                            if (isConnected && multiTunnelStatus.isMultiMode) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.28f),
+                                    contentColor = MaterialTheme.colorScheme.onSurface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.42f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("dual_vpn_status_card")
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        DualVpnNodePill(
-                                            roleLabel = strings.dualVpnActiveLabel,
-                                            nodeName = multiTunnelStatus.activeNodeName.ifBlank { "-" },
-                                            badge = multiTunnelStatus.activeNodeBadge,
-                                            latencyMs = multiTunnelStatus.activeNodeLatencyMs,
-                                            statusAccent = MaterialTheme.colorScheme.primary,
-                                            statusBadgeText = "${multiTunnelStatus.healthyCount}/${multiTunnelStatus.totalCount}",
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Hub,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.tertiary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Text(
+                                                    text = strings.dualVpnTitle,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                if (multiTunnelStatus.switchCount > 0) {
+                                                    Text(
+                                                        text = "• ${strings.multiTunnelSwitchesCount(multiTunnelStatus.switchCount)}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            }
+                                            if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
+                                                FilledTonalButton(
+                                                    onClick = onSwitchMultiNode,
+                                                    modifier = Modifier
+                                                        .minimumInteractiveComponentSize()
+                                                        .testTag("switch_multi_vpn_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.SwapHoriz,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.size(4.dp))
+                                                    Text(
+                                                        text = strings.switchVpnNowButton,
+                                                        style = MaterialTheme.typography.labelMedium
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
                                             DualVpnNodePill(
-                                                roleLabel = strings.dualVpnStandbyLabel,
-                                                nodeName = multiTunnelStatus.standbyNodeName,
-                                                badge = multiTunnelStatus.standbyNodeBadge.orEmpty(),
-                                                latencyMs = multiTunnelStatus.standbyNodeLatencyMs,
-                                                statusAccent = if (multiTunnelStatus.standbyReady) MaterialTheme.colorScheme.secondary else AmberStatus,
-                                                statusBadgeText = if (multiTunnelStatus.standbyReady) strings.dualVpnReadyLabel else strings.dualVpnWarmingLabel,
+                                                roleLabel = strings.dualVpnActiveLabel,
+                                                nodeName = multiTunnelStatus.activeNodeName.ifBlank { "-" },
+                                                badge = multiTunnelStatus.activeNodeBadge,
+                                                latencyMs = multiTunnelStatus.activeNodeLatencyMs,
+                                                statusAccent = ConnectedGreen,
+                                                statusBadgeText = "${multiTunnelStatus.healthyCount}/${multiTunnelStatus.totalCount}",
                                                 modifier = Modifier.weight(1f)
                                             )
+                                            if (!multiTunnelStatus.standbyNodeName.isNullOrBlank()) {
+                                                DualVpnNodePill(
+                                                    roleLabel = strings.dualVpnStandbyLabel,
+                                                    nodeName = multiTunnelStatus.standbyNodeName,
+                                                    badge = multiTunnelStatus.standbyNodeBadge.orEmpty(),
+                                                    latencyMs = multiTunnelStatus.standbyNodeLatencyMs,
+                                                    statusAccent = if (multiTunnelStatus.standbyReady) MaterialTheme.colorScheme.secondary else AmberStatus,
+                                                    statusBadgeText = if (multiTunnelStatus.standbyReady) strings.dualVpnReadyLabel else strings.dualVpnWarmingLabel,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -967,144 +915,175 @@ fun DashboardScreen(
                         }
                     }
                 }
+            }
 
-            // Connection Guard: Firewall (Kill Switch), Auto-Reconnect & System Always-On VPN
+            // Connection Guard: auto-collapses after VPN connects, tap header to expand/collapse
             Card(
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
                     contentColor = MaterialTheme.colorScheme.onSurface
                 ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.45f else 0.52f)),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .shadow(
+                        elevation = 8.dp,
+                        shape = RoundedCornerShape(22.dp),
+                        ambientColor = NavyShadow,
+                        spotColor = NavyShadow
+                    )
                     .testTag("protection_options_card")
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(if (isProtectionExpanded) 12.dp else 0.dp)
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.GppGood,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = strings.protectionCardTitle,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    // Option 1: Firewall (Kill Switch)
-                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable { onToggleKillSwitch(!settings.killSwitchEnabled) }
-                            .padding(vertical = 4.dp)
-                            .testTag("kill_switch_row"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Security,
-                            contentDescription = null,
-                            tint = if (settings.killSwitchEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = strings.killSwitchTitle,
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = strings.killSwitchDesc,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = settings.killSwitchEnabled,
-                            onCheckedChange = onToggleKillSwitch,
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("kill_switch_toggle")
-                        )
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
-
-                    // Option 2: Auto-Reconnect
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onToggleAutoReconnect(!settings.autoReconnectEnabled) }
-                            .padding(vertical = 4.dp)
-                            .testTag("auto_reconnect_row"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Autorenew,
-                            contentDescription = null,
-                            tint = if (settings.autoReconnectEnabled) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = strings.autoReconnectTitle,
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = strings.autoReconnectDesc,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = settings.autoReconnectEnabled,
-                            onCheckedChange = onToggleAutoReconnect,
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("auto_reconnect_toggle")
-                        )
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
-
-                    // Clearly labeled shortcut for Android OS Always-On VPN settings
-                    OutlinedButton(
-                        onClick = {
-                            onToggleSystemAlwaysOn(true)
-                            runCatching {
-                                context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
+                            .clickable { isProtectionExpanded = !isProtectionExpanded }
                             .minimumInteractiveComponentSize()
-                            .semantics { contentDescription = strings.systemAlwaysOnVpnDesc }
-                            .testTag("system_vpn_settings_button")
+                            .testTag("protection_card_header"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.GppGood,
+                                contentDescription = null,
+                                tint = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = strings.protectionCardTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Icon(
-                            imageVector = Icons.Filled.Settings,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                            imageVector = if (isProtectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = strings.protectionCardTitle,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text(
-                            text = strings.systemAlwaysOnVpn,
-                            style = MaterialTheme.typography.labelLarge
-                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = isProtectionExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            // Option 1: Firewall (Kill Switch)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onToggleKillSwitch(!settings.killSwitchEnabled) }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("kill_switch_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Security,
+                                    contentDescription = null,
+                                    tint = if (settings.killSwitchEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = strings.killSwitchTitle,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = strings.killSwitchDesc,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = settings.killSwitchEnabled,
+                                    onCheckedChange = onToggleKillSwitch,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("kill_switch_toggle")
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
+
+                            // Option 2: Auto-Reconnect
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onToggleAutoReconnect(!settings.autoReconnectEnabled) }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("auto_reconnect_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Autorenew,
+                                    contentDescription = null,
+                                    tint = if (settings.autoReconnectEnabled) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = strings.autoReconnectTitle,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = strings.autoReconnectDesc,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = settings.autoReconnectEnabled,
+                                    onCheckedChange = onToggleAutoReconnect,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("auto_reconnect_toggle")
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
+
+                            // Clearly labeled shortcut for Android OS Always-On VPN settings
+                            OutlinedButton(
+                                onClick = {
+                                    onToggleSystemAlwaysOn(true)
+                                    runCatching {
+                                        context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .minimumInteractiveComponentSize()
+                                    .semantics { contentDescription = strings.systemAlwaysOnVpnDesc }
+                                    .testTag("system_vpn_settings_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Settings,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.size(8.dp))
+                                Text(
+                                    text = strings.systemAlwaysOnVpn,
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1113,13 +1092,19 @@ fun DashboardScreen(
             Card(
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
                     contentColor = MaterialTheme.colorScheme.onSurface
                 ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.45f else 0.52f)),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .shadow(
+                        elevation = 8.dp,
+                        shape = RoundedCornerShape(22.dp),
+                        ambientColor = NavyShadow,
+                        spotColor = NavyShadow
+                    )
                     .testTag("exit_ip_card")
             ) {
                 Column(
@@ -1247,12 +1232,18 @@ fun DashboardScreen(
             // Quick Split Tunneling Summary Strip
             Surface(
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.45f else 0.52f)),
                 tonalElevation = 0.dp,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .shadow(
+                        elevation = 6.dp,
+                        shape = RoundedCornerShape(18.dp),
+                        ambientColor = NavyShadow,
+                        spotColor = NavyShadow
+                    )
                     .clip(RoundedCornerShape(18.dp))
                     .clickable(onClick = onNavigateToSplitTunnel)
                     .testTag("split_tunnel_summary_card")
@@ -1296,6 +1287,115 @@ fun DashboardScreen(
                 }
             }
 
+            // Quick Access Shortcuts: 1-Tap Home Screen Widget & Control Center (Quick Settings) Tile
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dashboard_quick_shortcuts_row"),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.45f else 0.52f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .shadow(
+                            elevation = 6.dp,
+                            shape = RoundedCornerShape(16.dp),
+                            ambientColor = NavyShadow,
+                            spotColor = NavyShadow
+                        )
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable {
+                            val requested = BaldrVpnWidgetProvider.requestPinWidget(context)
+                            if (!requested) {
+                                Toast.makeText(context, strings.pinWidgetNotSupportedToast, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        .minimumInteractiveComponentSize()
+                        .testTag("dashboard_pin_widget_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AddToHomeScreen,
+                            contentDescription = strings.quickWidgetShortButton,
+                            tint = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.size(6.dp))
+                        Text(
+                            text = strings.quickWidgetShortButton,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = if (isDarkTheme) 0.78f else 0.92f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.outline.copy(alpha = if (isDarkTheme) 0.45f else 0.52f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .shadow(
+                            elevation = 6.dp,
+                            shape = RoundedCornerShape(16.dp),
+                            ambientColor = NavyShadow,
+                            spotColor = NavyShadow
+                        )
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable {
+                            if (BaldrQuickTileService.canRequestAddTile()) {
+                                BaldrQuickTileService.requestAddTileToPanel(context) { resultCode ->
+                                    val msg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                        (resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ||
+                                            resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED)
+                                    ) {
+                                        strings.quickTileAddedToast
+                                    } else {
+                                        strings.quickTileManualHintToast
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                }
+                            } else {
+                                Toast.makeText(context, strings.quickTileManualHintToast, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        .minimumInteractiveComponentSize()
+                        .testTag("dashboard_add_tile_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.NotificationsActive,
+                            contentDescription = strings.controlCenterShortButton,
+                            tint = if (isConnected) ConnectedGreen else MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.size(6.dp))
+                        Text(
+                            text = strings.controlCenterShortButton,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
         }
     }
@@ -1311,9 +1411,9 @@ private fun StatTile(
 ) {
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.54f),
         contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.36f)),
         modifier = modifier
     ) {
         Column(

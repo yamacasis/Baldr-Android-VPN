@@ -7,7 +7,9 @@ import com.example.model.VpnProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
+import okhttp3.Dns
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -18,8 +20,6 @@ import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
 import java.net.InetAddress
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -28,6 +28,7 @@ import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -49,7 +50,6 @@ import javax.net.ssl.X509TrustManager
 @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
 object V2RayTransport {
 
-    private const val WS_PIPE_BUFFER_BYTES = 131_072
     private const val WS_PING_NORMAL_SEC = 20L
     private const val WS_PING_LOW_BATTERY_SEC = 45L
 
@@ -155,14 +155,31 @@ object V2RayTransport {
         timeoutMs: Int
     ): TunnelStream {
         val scheme = if (profile.tlsEnabled) "wss" else "ws"
-        val cleanPath = if (profile.wsPath.startsWith("/")) profile.wsPath else "/${profile.wsPath}"
-        val url = "$scheme://${profile.host}:${profile.port}$cleanPath"
+        val sanitizedPath = profile.wsPath
+            .substringBefore("?ed=")
+            .substringBefore("&ed=")
+            .trim()
+            .ifBlank { "/" }
+        val cleanPath = if (sanitizedPath.startsWith("/")) sanitizedPath else "/$sanitizedPath"
+        val effectiveSni = profile.sni.ifBlank { profile.wsHost }.ifBlank { profile.host }.trim()
+        val useSniAuthority = profile.tlsEnabled && isValidHostname(effectiveSni)
+        val urlAuthority = if (useSniAuthority) effectiveSni else profile.host.trim()
+        val url = "$scheme://$urlAuthority:${profile.port}$cleanPath"
 
-        // Derive lightweight client sharing Dispatcher & ConnectionPool (no per-stream thread leak)
+        // Derive lightweight client sharing Dispatcher & ConnectionPool (no per-stream thread leak).
+        // Custom DNS resolves the authority host directly to profile.host so CDN/Cloudflare IPs
+        // still send the proper TLS SNI (effectiveSni) and verify certificates against it.
         val pingSec = if (lowBatteryMode) WS_PING_LOW_BATTERY_SEC else WS_PING_NORMAL_SEC
+        val targetHost = profile.host.trim()
         val builder = sharedBaseClient.newBuilder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .pingInterval(pingSec, TimeUnit.SECONDS)
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    return listOf(ProtectedSocketFactory.resolveWithFallback(targetHost))
+                }
+            })
             .socketFactory(object : SocketFactory() {
                 override fun createSocket(): Socket = Socket().also {
                     protector(it)
@@ -170,13 +187,13 @@ object V2RayTransport {
                     it.keepAlive = true
                 }
                 override fun createSocket(host: String, port: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host, port, timeoutMs, protector)
+                    ProtectedSocketFactory.openTcp(targetHost, port, timeoutMs, protector)
                 override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host, port, timeoutMs, protector)
+                    ProtectedSocketFactory.openTcp(targetHost, port, timeoutMs, protector)
                 override fun createSocket(host: InetAddress, port: Int): Socket =
-                    ProtectedSocketFactory.openTcp(host.hostAddress ?: "", port, timeoutMs, protector)
+                    ProtectedSocketFactory.openTcp(targetHost, port, timeoutMs, protector)
                 override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
-                    ProtectedSocketFactory.openTcp(address.hostAddress ?: "", port, timeoutMs, protector)
+                    ProtectedSocketFactory.openTcp(targetHost, port, timeoutMs, protector)
             })
 
         if (profile.allowInsecure && profile.tlsEnabled) {
@@ -186,16 +203,24 @@ object V2RayTransport {
 
         val client = builder.build()
         val reqBuilder = Request.Builder().url(url)
-        val wsHostHeader = profile.wsHost.ifBlank { profile.sni }
+        val wsHostHeader = profile.wsHost.ifBlank { profile.sni }.trim()
         if (wsHostHeader.isNotBlank()) {
             reqBuilder.header("Host", wsHostHeader)
         }
 
-        val pipedIn = PipedInputStream(WS_PIPE_BUFFER_BYTES)
-        val pipedOut = PipedOutputStream(pipedIn)
+        val rxQueue = LinkedBlockingQueue<ByteArray>(256)
+        val eofSentinel = ByteArray(0)
         val openLatch = CountDownLatch(1)
         val openError = AtomicReference<Throwable?>(null)
         val closedFlag = AtomicBoolean(false)
+
+        fun signalEof() {
+            if (closedFlag.compareAndSet(false, true)) {
+                rxQueue.offer(eofSentinel)
+            } else {
+                rxQueue.offer(eofSentinel)
+            }
+        }
 
         val ws = client.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -204,44 +229,83 @@ object V2RayTransport {
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (closedFlag.get()) return
-                runCatching {
-                    pipedOut.write(bytes.toByteArray())
-                    pipedOut.flush()
-                }
+                val arr = bytes.toByteArray()
+                if (arr.isEmpty()) return
+                runCatching { rxQueue.put(arr) }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (closedFlag.get() || text.isEmpty()) return
+                runCatching { rxQueue.put(text.toByteArray(Charsets.UTF_8)) }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                closedFlag.set(true)
-                runCatching { pipedOut.close() }
+                signalEof()
                 webSocket.close(1000, null)
             }
 
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                signalEof()
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                closedFlag.set(true)
-                openError.set(t)
+                openError.compareAndSet(null, t)
                 openLatch.countDown()
-                runCatching { pipedOut.close() }
+                signalEof()
             }
         })
 
         if (!openLatch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)) {
-            closedFlag.set(true)
+            signalEof()
             ws.cancel()
-            runCatching { pipedIn.close() }
-            runCatching { pipedOut.close() }
             throw IOException("WebSocket handshake timeout")
         }
         openError.get()?.let {
-            closedFlag.set(true)
+            signalEof()
             ws.cancel()
-            runCatching { pipedIn.close() }
-            runCatching { pipedOut.close() }
             throw IOException("WebSocket failed: ${it.message}", it)
+        }
+
+        val queueIn = object : InputStream() {
+            private var current: ByteArray? = null
+            private var offset = 0
+            private var eofReached = false
+
+            override fun read(): Int {
+                val b = ByteArray(1)
+                val n = read(b, 0, 1)
+                return if (n < 0) -1 else b[0].toInt() and 0xFF
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (len <= 0) return 0
+                if (eofReached) return -1
+                while (current == null || offset >= current!!.size) {
+                    val next = try {
+                        rxQueue.take()
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        eofReached = true
+                        return -1
+                    }
+                    if (next === eofSentinel || next.isEmpty()) {
+                        eofReached = true
+                        return -1
+                    }
+                    current = next
+                    offset = 0
+                }
+                val chunk = current!!
+                val copyLen = minOf(len, chunk.size - offset)
+                System.arraycopy(chunk, offset, b, off, copyLen)
+                offset += copyLen
+                return copyLen
+            }
         }
 
         return object : TunnelStream {
             override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-                pipedIn.read(buffer, offset, length)
+                queueIn.read(buffer, offset, length)
 
             override fun write(data: ByteArray, offset: Int, length: Int) {
                 if (closedFlag.get() || !ws.send(data.toByteString(offset, length))) {
@@ -249,16 +313,20 @@ object V2RayTransport {
                 }
             }
 
-            override fun inputStream(): InputStream = pipedIn
+            override fun inputStream(): InputStream = queueIn
 
             override fun close() {
-                if (closedFlag.compareAndSet(false, true)) {
-                    runCatching { ws.close(1000, "closed") }
-                    runCatching { pipedIn.close() }
-                    runCatching { pipedOut.close() }
-                }
+                signalEof()
+                runCatching { ws.close(1000, "closed") }
             }
         }
+    }
+
+    private fun isValidHostname(host: String): Boolean {
+        if (host.isBlank() || host.length > 253) return false
+        if (host.any { it.isWhitespace() || it == '/' || it == '@' || it == ':' }) return false
+        if (host.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$"))) return false
+        return host.contains('.')
     }
 }
 
@@ -379,18 +447,16 @@ class TrojanConnector(
     }
 
     override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
-        V2RayTransport.probeTransportReachable(profile.copy(tlsEnabled = true), protector)
+        V2RayTransport.probeTransportReachable(profile, protector)
     }
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
-        val tlsProfile = profile.copy(tlsEnabled = true)
-        V2RayTransport.openRawStream(tlsProfile, protector, lowBatteryMode.get()).close()
+        V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get()).close()
     }
 
     override suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream =
         withContext(Dispatchers.IO) {
-            val tlsProfile = profile.copy(tlsEnabled = true)
-            val raw = V2RayTransport.openRawStream(tlsProfile, protector, lowBatteryMode.get())
+            val raw = V2RayTransport.openRawStream(profile, protector, lowBatteryMode.get())
             try {
                 val out = ByteArrayOutputStream()
                 out.write(hashedPasswordHex)
@@ -417,17 +483,18 @@ class ShadowsocksConnector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
-    private val cipherMode = profile.cipher.lowercase()
+    private val cipherMode = profile.cipher.trim().lowercase()
     private val keySize = when {
-        cipherMode.contains("128") -> 16
+        cipherMode == "aes-128-gcm" -> 16
         else -> 32
     }
-    private val isChaCha = cipherMode.contains("chacha20")
+    private val isChaCha = cipherMode == "chacha20-ietf-poly1305" || cipherMode == "chacha20-poly1305"
     private val masterKey: ByteArray by lazy {
         evpBytesToKey(profile.passwordOrSecret.toByteArray(Charsets.UTF_8), keySize)
     }
 
     override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
+        if (!isSupportedCipher(cipherMode)) return@withContext false
         runCatching {
             ProtectedSocketFactory.openTcp(
                 host = profile.host,
@@ -442,10 +509,25 @@ class ShadowsocksConnector(
     }
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
+        if (!isSupportedCipher(cipherMode)) {
+            throw IOException("Unsupported Shadowsocks cipher: ${profile.cipher}")
+        }
         if (isChaCha && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             throw IOException("ChaCha20-Poly1305 requires Android 9+ (API 28+)")
         }
         ProtectedSocketFactory.openTcp(profile.host, profile.port, 8000, protector).close()
+    }
+
+    companion object {
+        val SUPPORTED_AEAD_CIPHERS = setOf(
+            "aes-256-gcm",
+            "aes-128-gcm",
+            "chacha20-ietf-poly1305",
+            "chacha20-poly1305"
+        )
+
+        fun isSupportedCipher(cipher: String): Boolean =
+            SUPPORTED_AEAD_CIPHERS.contains(cipher.trim().lowercase())
     }
 
     override suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream =
@@ -740,21 +822,48 @@ class VmessConnector(
     }
 
     companion object {
+        /**
+         * Official V2Ray / Xray VMess AEAD KDF: recursive nested HMAC with 64-byte block size.
+         * Base hash: H_0(m) = HMAC-SHA256(key = "VMess AEAD KDF", msg = m).
+         * Each path_i wraps H_{i-1}: H_i(m) = H_{i-1}(opad || H_{i-1}(ipad || m)).
+         */
         internal fun kdf(key: ByteArray, vararg paths: Any): ByteArray {
-            var currentKey = "VMess AEAD KDF".toByteArray(Charsets.US_ASCII)
+            val sha256: (ByteArray) -> ByteArray = { data ->
+                MessageDigest.getInstance("SHA-256").digest(data)
+            }
+            var currentHash = nestHmac(sha256, "VMess AEAD KDF".toByteArray(Charsets.US_ASCII))
             for (path in paths) {
                 val label = when (path) {
                     is String -> path.toByteArray(Charsets.US_ASCII)
                     is ByteArray -> path
                     else -> ByteArray(0)
                 }
-                val mac = Mac.getInstance("HmacSHA256")
-                mac.init(SecretKeySpec(currentKey, "HmacSHA256"))
-                currentKey = mac.doFinal(label)
+                currentHash = nestHmac(currentHash, label)
             }
-            val mac = Mac.getInstance("HmacSHA256")
-            mac.init(SecretKeySpec(currentKey, "HmacSHA256"))
-            return mac.doFinal(key)
+            return currentHash(key)
+        }
+
+        private fun nestHmac(
+            parentHash: (ByteArray) -> ByteArray,
+            hmacKey: ByteArray
+        ): (ByteArray) -> ByteArray {
+            val blockSize = 64
+            val normalizedKey = if (hmacKey.size > blockSize) parentHash(hmacKey) else hmacKey
+            val keyBlock = ByteArray(blockSize)
+            System.arraycopy(normalizedKey, 0, keyBlock, 0, normalizedKey.size.coerceAtMost(blockSize))
+            val ipad = ByteArray(blockSize) { i -> (keyBlock[i].toInt() xor 0x36).toByte() }
+            val opad = ByteArray(blockSize) { i -> (keyBlock[i].toInt() xor 0x5c).toByte() }
+            return { message ->
+                val innerInput = ByteArray(blockSize + message.size)
+                System.arraycopy(ipad, 0, innerInput, 0, blockSize)
+                System.arraycopy(message, 0, innerInput, blockSize, message.size)
+                val innerDigest = parentHash(innerInput)
+
+                val outerInput = ByteArray(blockSize + innerDigest.size)
+                System.arraycopy(opad, 0, outerInput, 0, blockSize)
+                System.arraycopy(innerDigest, 0, outerInput, blockSize, innerDigest.size)
+                parentHash(outerInput)
+            }
         }
 
         internal fun kdf16(key: ByteArray, vararg paths: Any): ByteArray =

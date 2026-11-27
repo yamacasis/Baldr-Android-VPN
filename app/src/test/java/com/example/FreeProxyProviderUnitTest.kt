@@ -146,4 +146,110 @@ class FreeProxyProviderUnitTest {
         )
         assertEquals("ProxyScrape (Mar 21) · 45.12.34.56:1080", enName)
     }
+
+    @Test
+    fun pingAndPickBest_neverFallsBackToUnverifiedTxOnlyCandidate() = runTest {
+        val candidates = listOf(
+            VpnProfile(name = "FastFake", protocol = VpnProtocol.VLESS, host = "10.0.0.1", port = 443),
+            VpnProfile(name = "SlowFake", protocol = VpnProtocol.SOCKS5, host = "10.0.0.2", port = 1080)
+        )
+
+        val result = FreeProxyProviderManager.pingAndPickBest(
+            candidates = candidates,
+            pingMeasure = { if (it.host == "10.0.0.1") 35 else 90 },
+            handshakeVerifier = { false } // All fail end-to-end RX check
+        )
+
+        org.junit.Assert.assertNull(result.bestProfile)
+        org.junit.Assert.assertFalse(result.verifiedHandshake)
+        assertEquals(2, result.reachableCount)
+        assertEquals(2, result.testedCount)
+    }
+
+    @Test
+    fun vmessKdf_implementsRecursiveNestedHmacMatchingV2RaySpec() {
+        val key = byteArrayOf(
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
+        )
+        val path1 = "AES Auth ID Encryption"
+        val actual = com.example.vpn.protocols.VmessConnector.kdf(key, path1)
+        assertEquals(32, actual.size)
+
+        // Independent reference calculation of 2-level nested HMAC:
+        // H0(m) = HMAC-SHA256(key="VMess AEAD KDF", msg=m)
+        // H1(m) = H0((path1_block XOR opad) || H0((path1_block XOR ipad) || m))
+        fun hmacSha256(k: ByteArray, m: ByteArray): ByteArray {
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+            mac.init(javax.crypto.spec.SecretKeySpec(k, "HmacSHA256"))
+            return mac.doFinal(m)
+        }
+        val baseKey = "VMess AEAD KDF".toByteArray(Charsets.US_ASCII)
+        val p1Block = ByteArray(64)
+        val p1Bytes = path1.toByteArray(Charsets.US_ASCII)
+        System.arraycopy(p1Bytes, 0, p1Block, 0, p1Bytes.size)
+        val ipad = ByteArray(64) { i -> (p1Block[i].toInt() xor 0x36).toByte() }
+        val opad = ByteArray(64) { i -> (p1Block[i].toInt() xor 0x5c).toByte() }
+        val inner = hmacSha256(baseKey, ipad + key)
+        val expected = hmacSha256(baseKey, opad + inner)
+
+        org.junit.Assert.assertArrayEquals(expected, actual)
+
+        // Ensure it differs from the old broken sequential HMAC
+        val brokenSequential = hmacSha256(hmacSha256(key, baseKey), p1Bytes)
+        org.junit.Assert.assertFalse(expected.contentEquals(brokenSequential))
+    }
+
+    @Test
+    fun dnsOverHttpsTunnel_parsesContentLengthAndChunkedResponsesAndHttpProxyPrefersDoH() = runTest {
+        val dnsPayload = byteArrayOf(
+            0x12, 0x34, 0x81.toByte(), 0x80.toByte(),
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x02, 0x03, 0x04
+        )
+        val clHeader = (
+            "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/dns-message\r\n" +
+                "Content-Length: ${dnsPayload.size}\r\n\r\n"
+            ).toByteArray(Charsets.US_ASCII)
+        val extractedCl = com.example.vpn.protocols.DnsOverHttpsTunnel.extractHttpBody(clHeader + dnsPayload)
+        org.junit.Assert.assertArrayEquals(dnsPayload, extractedCl)
+
+        val chunkedHeader = (
+            "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n"
+            ).toByteArray(Charsets.US_ASCII)
+        val part1 = dnsPayload.copyOfRange(0, 6)
+        val part2 = dnsPayload.copyOfRange(6, dnsPayload.size)
+        val chunkedBody = "6\r\n".toByteArray() + part1 + "\r\n".toByteArray() +
+            "${part2.size.toString(16)}\r\n".toByteArray() + part2 + "\r\n0\r\n\r\n".toByteArray()
+        val extractedChunked = com.example.vpn.protocols.DnsOverHttpsTunnel.extractHttpBody(chunkedHeader + chunkedBody)
+        org.junit.Assert.assertArrayEquals(dnsPayload, extractedChunked)
+
+        val errResp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\ntest".toByteArray(Charsets.US_ASCII)
+        org.junit.Assert.assertNull(com.example.vpn.protocols.DnsOverHttpsTunnel.extractHttpBody(errResp))
+
+        val httpProfile = VpnProfile(
+            name = "HTTP-Free",
+            protocol = VpnProtocol.HTTP_PROXY,
+            host = "1.2.3.4",
+            port = 8080
+        )
+        val httpConnector = com.example.vpn.protocols.HttpProxyConnector(httpProfile) { true }
+        assertTrue(httpConnector.preferDnsOverHttps)
+
+        // Verify UpstreamConnector.forwardDnsQuery falls back to port 443 when port 53 is blocked
+        val attemptedPorts = mutableListOf<Int>()
+        val fakeConnector = object : com.example.vpn.protocols.UpstreamConnector {
+            override suspend fun connect() = Unit
+            override suspend fun openTcpStream(dstHost: String, dstPort: Int): com.example.vpn.protocols.TunnelStream {
+                attemptedPorts.add(dstPort)
+                throw java.io.IOException("Simulated port $dstPort blocked")
+            }
+            override fun close() = Unit
+        }
+        fakeConnector.forwardDnsQuery(dnsPayload)
+        assertTrue("Must try port 53 first", attemptedPorts.firstOrNull() == 53)
+        assertTrue("Must fall back to DoH port 443 when port 53 fails", attemptedPorts.contains(443))
+    }
 }

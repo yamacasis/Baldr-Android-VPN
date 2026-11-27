@@ -121,6 +121,7 @@ object FreeProxyProviderCache {
         val seen = HashSet<String>()
         for (rawUri in uris) {
             val parsed = UriConfigParser.parseSingle(rawUri) ?: continue
+            if (!UriConfigParser.isConnectorCompatible(rawUri, parsed)) continue
             val key = "${parsed.protocol.name}:${parsed.host}:${parsed.port}"
             if (!seen.add(key)) continue
             val cleanBase = parsed.name.trim().ifBlank { "${parsed.host}:${parsed.port}" }

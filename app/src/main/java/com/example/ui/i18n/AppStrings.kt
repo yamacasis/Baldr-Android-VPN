@@ -262,6 +262,11 @@ interface AppStrings {
     val freeProviderBackgroundSyncBanner: (String, Int, Int) -> String
     val freeProviderUsingOfflineFallback: String
     val freeProviderUpdatingNow: String
+    val freeProvidersDisclaimerTitle: String
+    val freeProvidersDisclaimerBody: String
+    val serverSpeedDetailsTitle: String
+    val quickWidgetShortButton: String
+    val controlCenterShortButton: String
 }
 
 object FarsiStrings : AppStrings {
@@ -529,6 +534,11 @@ object FarsiStrings : AppStrings {
     override val freeProviderBackgroundSyncBanner: (String, Int, Int) -> String = { name, done, total -> "VPN متصل است · بروزرسانی تدریجی $name ($done از $total)..." }
     override val freeProviderUsingOfflineFallback = "در حال پینگ سرورهای پیش‌فرض ذخیره شده..."
     override val freeProviderUpdatingNow = "در حال بروزرسانی لیست..."
+    override val freeProvidersDisclaimerTitle = "سلب مسئولیت امنیتی پروایدرهای رایگان"
+    override val freeProvidersDisclaimerBody = "سرورهای این بخش توسط ارائه‌دهندگان عمومی و مستقل ارائه می‌شوند و مسئولیت امنیت، حریم خصوصی و حفاظت از اطلاعات روی آن‌ها تماماً بر عهده خود ارائه‌دهنده (پروایدر) است. لطفاً برای امور حساس بانکی از سرورهای رایگان عمومی استفاده نکنید."
+    override val serverSpeedDetailsTitle = "جزئیات سرور و سرعت"
+    override val quickWidgetShortButton = "ویجت اتصال سریع"
+    override val controlCenterShortButton = "دکمه کنترل سنتر"
 }
 
 object EnglishStrings : AppStrings {
@@ -796,4 +806,9 @@ object EnglishStrings : AppStrings {
     override val freeProviderBackgroundSyncBanner: (String, Int, Int) -> String = { name, done, total -> "VPN active · Refreshing $name ($done/$total)..." }
     override val freeProviderUsingOfflineFallback = "Using bundled servers & pinging..."
     override val freeProviderUpdatingNow = "Updating list..."
+    override val freeProvidersDisclaimerTitle = "Free Providers Security Disclaimer"
+    override val freeProvidersDisclaimerBody = "Servers listed here are operated by independent public third-party providers. Security, privacy, and data handling on these servers are solely the responsibility of each provider. Avoid sensitive banking activity over public free proxies."
+    override val serverSpeedDetailsTitle = "Server & Speed Details"
+    override val quickWidgetShortButton = "Quick Widget"
+    override val controlCenterShortButton = "Control Center"
 }

@@ -16,7 +16,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
@@ -108,6 +110,9 @@ import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplitTunnelScreen
 import com.example.ui.theme.BaldrGold
+import com.example.ui.theme.ConnectedGreenDarkRing
+import com.example.ui.theme.ConnectedGreenDeep
+import com.example.ui.theme.ConnectedGreenLight
 import com.example.ui.theme.LapisEmblemBg
 import com.example.ui.theme.NetShieldTheme
 import com.example.vpn.AppAnalytics
@@ -357,6 +362,26 @@ fun NetShieldApp(
                     modifier = Modifier.fillMaxSize()
                 )
 
+                val isVpnConnected = connectionState == ConnectionState.CONNECTED
+                val navSelectedColor by animateColorAsState(
+                    targetValue = if (isVpnConnected) {
+                        if (isDarkTheme) ConnectedGreenLight else ConnectedGreenDeep
+                    } else {
+                        MaterialTheme.colorScheme.secondary
+                    },
+                    animationSpec = spring(),
+                    label = "nav_selected_color"
+                )
+                val navIndicatorColor by animateColorAsState(
+                    targetValue = if (isVpnConnected) {
+                        ConnectedGreenDarkRing.copy(alpha = if (isDarkTheme) 0.78f else 0.22f)
+                    } else {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    },
+                    animationSpec = spring(),
+                    label = "nav_indicator_color"
+                )
+
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val useRail = maxWidth >= 600.dp
 
@@ -366,13 +391,13 @@ fun NetShieldApp(
                         bottomBar = {
                             if (!useRail) {
                                 NavigationBar(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f),
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
                                     val navItemColors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.secondary,
-                                        selectedTextColor = MaterialTheme.colorScheme.secondary,
-                                        indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        selectedIconColor = navSelectedColor,
+                                        selectedTextColor = navSelectedColor,
+                                        indicatorColor = navIndicatorColor,
                                         unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                         unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -403,13 +428,13 @@ fun NetShieldApp(
                         ) {
                             if (useRail) {
                                 NavigationRail(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f),
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ) {
                                     val railItemColors = NavigationRailItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.secondary,
-                                        selectedTextColor = MaterialTheme.colorScheme.secondary,
-                                        indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        selectedIconColor = navSelectedColor,
+                                        selectedTextColor = navSelectedColor,
+                                        indicatorColor = navIndicatorColor,
                                         unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                         unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                                     )

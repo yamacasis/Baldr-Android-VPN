@@ -659,4 +659,52 @@ class VpnCoreUnitTest {
         val defaults = com.example.data.AppSettings()
         org.junit.Assert.assertTrue(defaults.lowBatteryAutoModeEnabled)
     }
+
+    @Test
+    fun uriConfigParser_filtersIncompatibleTransportsAndParsesCaseInsensitiveParams() {
+        val vmessGoodJson = """{"v":"2","ps":"Good-VMess","add":"104.21.10.1","port":443,"id":"22222222-2222-2222-2222-222222222222","aid":0,"net":"ws","host":"cdn.example.com","path":"/ws","tls":"tls","skip-cert-verify":true}"""
+        val vmessGood = "vmess://" + android.util.Base64.encodeToString(vmessGoodJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+
+        val vmessBadJson = """{"v":"2","ps":"Bad-AlterId","add":"104.21.10.2","port":443,"id":"22222222-2222-2222-2222-222222222222","aid":64,"net":"ws","host":"cdn.example.com","path":"/ws","tls":"tls"}"""
+        val vmessBad = "vmess://" + android.util.Base64.encodeToString(vmessBadJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+
+        val ss2022 = "ss://" + android.util.Base64.encodeToString("2022-blake3-aes-128-gcm:secretkey".toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP) + "@1.2.3.4:443#SS2022"
+        val ssLegacy = "ss://" + android.util.Base64.encodeToString("aes-128-cfb:pass".toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP) + "@1.2.3.5:8388#SSLegacy"
+        val ssGood = "ss://" + android.util.Base64.encodeToString("chacha20-ietf-poly1305:secret".toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP) + "@1.2.3.6:8388#SSGood"
+
+        val batch = """
+            vless://11111111-1111-1111-1111-111111111111@1.1.1.1:443?security=reality&pbk=abc123&sni=yahoo.com&type=tcp#Reality-Rejected
+            vless://11111111-1111-1111-1111-111111111111@1.1.1.2:443?security=tls&flow=xtls-rprx-vision&type=tcp#Vision-Rejected
+            vless://11111111-1111-1111-1111-111111111111@1.1.1.3:443?security=tls&type=httpupgrade&path=/up#HttpUpgrade-Rejected
+            vless://11111111-1111-1111-1111-111111111111@1.1.1.4:443?security=tls&amp;type=ws&amp;host=edge.example.com&amp;sni=edge.example.com&amp;path=%2Fws%3Fed%3D2048#Good-VLESS-WS
+            trojan://pass123@2.2.2.2:443?security=tls&amp;type=ws&amp;Host=tr.example.com&amp;sni=tr.example.com&amp;path=%2Ftr#Good-Trojan-WS
+            $vmessGood
+            $vmessBad
+            $ss2022
+            $ssLegacy
+            $ssGood
+        """.trimIndent()
+
+        val compatible = UriConfigParser.parseCompatibleBatch(batch)
+        assertEquals(4, compatible.size)
+
+        // 1) Good VLESS WS+TLS with HTML &amp; unescaped
+        assertEquals(VpnProtocol.VLESS, compatible[0].protocol)
+        assertEquals(TransportType.WS, compatible[0].transport)
+        assertEquals("edge.example.com", compatible[0].wsHost)
+        assertEquals("edge.example.com", compatible[0].sni)
+
+        // 2) Good Trojan WS+TLS with uppercase &Host= parsed case-insensitively
+        assertEquals(VpnProtocol.TROJAN, compatible[1].protocol)
+        assertEquals("tr.example.com", compatible[1].wsHost)
+        assertEquals("/tr", compatible[1].wsPath)
+
+        // 3) Good VMess WS+TLS with skip-cert-verify recognized
+        assertEquals(VpnProtocol.VMESS, compatible[2].protocol)
+        org.junit.Assert.assertTrue(compatible[2].allowInsecure)
+
+        // 4) Good Shadowsocks AEAD
+        assertEquals(VpnProtocol.SHADOWSOCKS, compatible[3].protocol)
+        assertEquals("chacha20-ietf-poly1305", compatible[3].cipher)
+    }
 }

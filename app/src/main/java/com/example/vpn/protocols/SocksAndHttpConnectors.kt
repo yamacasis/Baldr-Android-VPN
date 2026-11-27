@@ -184,6 +184,8 @@ class HttpProxyConnector(
     private val protector: (Socket) -> Boolean
 ) : UpstreamConnector {
 
+    override val preferDnsOverHttps: Boolean = true
+
     override suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             val probe = if (profile.tlsEnabled) {

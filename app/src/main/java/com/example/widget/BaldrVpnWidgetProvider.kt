@@ -86,31 +86,31 @@ class BaldrVpnWidgetProvider : AppWidgetProvider() {
                     R.drawable.widget_bg_connected,
                     R.drawable.widget_icon_ring_connected,
                     context.getString(R.string.widget_status_connected),
-                    0xFF60A5FA.toInt()
+                    0xFF34E89E.toInt()
                 )
                 ConnectionState.CONNECTING -> Quad(
                     R.drawable.widget_bg_connecting,
                     R.drawable.widget_icon_ring_connecting,
                     context.getString(R.string.widget_status_connecting),
-                    0xFFF5B73B.toInt()
+                    0xFFFFAC52.toInt()
                 )
                 ConnectionState.RECONNECTING -> Quad(
                     R.drawable.widget_bg_connecting,
                     R.drawable.widget_icon_ring_connecting,
                     context.getString(R.string.widget_status_reconnecting),
-                    0xFFF5B73B.toInt()
+                    0xFFFFAC52.toInt()
                 )
                 ConnectionState.FIREWALL_LOCKED -> Quad(
                     R.drawable.widget_bg_connecting,
                     R.drawable.widget_icon_ring_connecting,
                     context.getString(R.string.widget_status_firewall),
-                    0xFFF45B6E.toInt()
+                    0xFFF43F5E.toInt()
                 )
                 else -> Quad(
                     R.drawable.widget_bg_disconnected,
                     R.drawable.widget_icon_ring_disconnected,
                     context.getString(R.string.widget_status_disconnected),
-                    0xFFA9BBE3.toInt()
+                    0xFF93C5FD.toInt()
                 )
             }
 

@@ -14,11 +14,14 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLEngineResult
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
@@ -63,14 +66,28 @@ interface UpstreamConnector : Closeable {
 
     fun setLowBatteryMode(enabled: Boolean) {}
 
+    val preferDnsOverHttps: Boolean
+        get() = false
+
     suspend fun connect()
     suspend fun openTcpStream(dstHost: String, dstPort: Int): TunnelStream
 
     /**
-     * Forwards a raw DNS query packet (UDP payload) through the active tunnel using DNS-over-TCP
-     * (RFC 1035 2-byte length prefix) to the configured DNS resolver.
+     * Forwards a raw DNS query packet (UDP payload) through the active tunnel.
+     * Supports both DNS-over-TCP (port 53) and automatic DNS-over-HTTPS (port 443, RFC 8484)
+     * fallback so free HTTP/SOCKS/V2Ray nodes that block port 53 still resolve domains reliably.
      */
     suspend fun forwardDnsQuery(dnsQuery: ByteArray, dnsServer: String = "1.1.1.1"): ByteArray? {
+        if (preferDnsOverHttps) {
+            forwardDnsOverHttps(dnsQuery)?.let { return it }
+            return runCatching { forwardDnsOverTcp(dnsQuery, dnsServer) }.getOrNull()
+        }
+        val tcpResp = runCatching { forwardDnsOverTcp(dnsQuery, dnsServer) }.getOrNull()
+        if (tcpResp != null) return tcpResp
+        return forwardDnsOverHttps(dnsQuery)
+    }
+
+    suspend fun forwardDnsOverTcp(dnsQuery: ByteArray, dnsServer: String = "1.1.1.1"): ByteArray? {
         val stream = openTcpStream(dnsServer, 53)
         return try {
             val framed = ByteArray(2 + dnsQuery.size)
@@ -87,6 +104,304 @@ interface UpstreamConnector : Closeable {
         } finally {
             runCatching { stream.close() }
         }
+    }
+
+    suspend fun forwardDnsOverHttps(dnsQuery: ByteArray): ByteArray? {
+        val dohEndpoints = listOf(
+            "1.1.1.1" to "cloudflare-dns.com",
+            "8.8.8.8" to "dns.google"
+        )
+        for ((ip, sni) in dohEndpoints) {
+            val resp = runCatching {
+                DnsOverHttpsTunnel.query(this, dnsQuery, ip, sni)
+            }.getOrNull()
+            if (resp != null && resp.size >= 12) return resp
+        }
+        return null
+    }
+}
+
+/**
+ * Pure SSLEngine-based RFC 8484 DNS-over-HTTPS client operating over any [TunnelStream]
+ * without needing a native FileDescriptor (compatible with WebSocket, VMess, VLESS, Trojan,
+ * Shadowsocks, SOCKS4/5, HTTP CONNECT, and SSH).
+ */
+internal object DnsOverHttpsTunnel {
+
+    suspend fun query(
+        connector: UpstreamConnector,
+        dnsQuery: ByteArray,
+        targetIp: String,
+        sniHost: String
+    ): ByteArray? {
+        val stream = connector.openTcpStream(targetIp, 443)
+        return try {
+            queryOverStream(stream, dnsQuery, sniHost)
+        } finally {
+            runCatching { stream.close() }
+        }
+    }
+
+    internal fun queryOverStream(
+        stream: TunnelStream,
+        dnsQuery: ByteArray,
+        sniHost: String,
+        sslContext: SSLContext = SSLContext.getDefault()
+    ): ByteArray? {
+        val engine = sslContext.createSSLEngine(sniHost, 443).apply {
+            useClientMode = true
+            val params = sslParameters
+            if (sniHost.isNotBlank()) {
+                params.serverNames = listOf(SNIHostName(sniHost))
+            }
+            sslParameters = params
+            beginHandshake()
+        }
+
+        val session = engine.session
+        var myNetBuf = ByteBuffer.allocate(session.packetBufferSize.coerceAtLeast(16_384))
+        var peerNetBuf = ByteBuffer.allocate(session.packetBufferSize.coerceAtLeast(16_384))
+        var peerAppBuf = ByteBuffer.allocate(session.applicationBufferSize.coerceAtLeast(16_384))
+        val emptyAppBuf = ByteBuffer.allocate(0)
+        val readTmp = ByteArray(8_192)
+
+        // 1) TLS Handshake
+        var hsStatus = engine.handshakeStatus
+        var hsSteps = 0
+        while (hsStatus != SSLEngineResult.HandshakeStatus.FINISHED &&
+            hsStatus != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING
+        ) {
+            if (++hsSteps > 200) throw IOException("TLS handshake step limit exceeded")
+            when (hsStatus) {
+                SSLEngineResult.HandshakeStatus.NEED_TASK -> {
+                    var task = engine.delegatedTask
+                    while (task != null) {
+                        task.run()
+                        task = engine.delegatedTask
+                    }
+                    hsStatus = engine.handshakeStatus
+                }
+                SSLEngineResult.HandshakeStatus.NEED_WRAP -> {
+                    myNetBuf.clear()
+                    val res = engine.wrap(emptyAppBuf, myNetBuf)
+                    when (res.status) {
+                        SSLEngineResult.Status.OK -> {
+                            myNetBuf.flip()
+                            if (myNetBuf.hasRemaining()) {
+                                val out = ByteArray(myNetBuf.remaining())
+                                myNetBuf.get(out)
+                                stream.write(out)
+                            }
+                            hsStatus = res.handshakeStatus
+                        }
+                        SSLEngineResult.Status.BUFFER_OVERFLOW -> {
+                            myNetBuf = ByteBuffer.allocate(myNetBuf.capacity() * 2)
+                        }
+                        SSLEngineResult.Status.CLOSED -> throw IOException("TLS closed during wrap")
+                        else -> hsStatus = res.handshakeStatus
+                    }
+                }
+                SSLEngineResult.HandshakeStatus.NEED_UNWRAP -> {
+                    peerNetBuf.flip()
+                    val res = engine.unwrap(peerNetBuf, peerAppBuf)
+                    peerNetBuf.compact()
+                    when (res.status) {
+                        SSLEngineResult.Status.OK -> {
+                            hsStatus = res.handshakeStatus
+                        }
+                        SSLEngineResult.Status.BUFFER_UNDERFLOW -> {
+                            if (peerNetBuf.remaining() == 0) {
+                                peerNetBuf = growByteBuffer(peerNetBuf)
+                            }
+                            val n = stream.read(readTmp, 0, minOf(readTmp.size, peerNetBuf.remaining()))
+                            if (n < 0) throw EOFException("EOF during DoH TLS handshake")
+                            if (n > 0) peerNetBuf.put(readTmp, 0, n)
+                        }
+                        SSLEngineResult.Status.BUFFER_OVERFLOW -> {
+                            peerAppBuf = ByteBuffer.allocate(peerAppBuf.capacity() * 2)
+                        }
+                        SSLEngineResult.Status.CLOSED -> throw IOException("TLS closed during unwrap")
+                        else -> hsStatus = res.handshakeStatus
+                    }
+                }
+                else -> break
+            }
+        }
+
+        // 2) Send RFC 8484 HTTP/1.1 POST /dns-query request
+        val reqHeader = buildString {
+            append("POST /dns-query HTTP/1.1\r\n")
+            append("Host: ").append(sniHost).append("\r\n")
+            append("Content-Type: application/dns-message\r\n")
+            append("Accept: application/dns-message\r\n")
+            append("Content-Length: ").append(dnsQuery.size).append("\r\n")
+            append("Connection: close\r\n\r\n")
+        }.toByteArray(Charsets.US_ASCII)
+        val reqBytes = ByteArray(reqHeader.size + dnsQuery.size)
+        System.arraycopy(reqHeader, 0, reqBytes, 0, reqHeader.size)
+        System.arraycopy(dnsQuery, 0, reqBytes, reqHeader.size, dnsQuery.size)
+
+        val appOutBuf = ByteBuffer.wrap(reqBytes)
+        while (appOutBuf.hasRemaining()) {
+            myNetBuf.clear()
+            val res = engine.wrap(appOutBuf, myNetBuf)
+            when (res.status) {
+                SSLEngineResult.Status.OK -> {
+                    myNetBuf.flip()
+                    if (myNetBuf.hasRemaining()) {
+                        val out = ByteArray(myNetBuf.remaining())
+                        myNetBuf.get(out)
+                        stream.write(out)
+                    }
+                }
+                SSLEngineResult.Status.BUFFER_OVERFLOW -> {
+                    myNetBuf = ByteBuffer.allocate(myNetBuf.capacity() * 2)
+                }
+                else -> throw IOException("DoH TLS wrap failed: ${res.status}")
+            }
+        }
+
+        // 3) Read and decrypt HTTP response until complete body is received
+        val plainOut = ByteArrayOutputStream()
+        var done = false
+        while (!done && plainOut.size() < 32_768) {
+            peerNetBuf.flip()
+            var needMoreNet = false
+            while (peerNetBuf.hasRemaining()) {
+                peerAppBuf.clear()
+                val res = engine.unwrap(peerNetBuf, peerAppBuf)
+                when (res.status) {
+                    SSLEngineResult.Status.OK -> {
+                        peerAppBuf.flip()
+                        if (peerAppBuf.hasRemaining()) {
+                            val chunk = ByteArray(peerAppBuf.remaining())
+                            peerAppBuf.get(chunk)
+                            plainOut.write(chunk)
+                        }
+                        if (isHttpResponseComplete(plainOut.toByteArray())) {
+                            done = true
+                            break
+                        }
+                    }
+                    SSLEngineResult.Status.BUFFER_UNDERFLOW -> {
+                        needMoreNet = true
+                        break
+                    }
+                    SSLEngineResult.Status.BUFFER_OVERFLOW -> {
+                        peerAppBuf = ByteBuffer.allocate(peerAppBuf.capacity() * 2)
+                    }
+                    SSLEngineResult.Status.CLOSED -> {
+                        done = true
+                        break
+                    }
+                    else -> break
+                }
+            }
+            peerNetBuf.compact()
+            if (done) break
+
+            if (needMoreNet || peerNetBuf.position() == 0) {
+                if (peerNetBuf.remaining() == 0) {
+                    peerNetBuf = growByteBuffer(peerNetBuf)
+                }
+                val n = stream.read(readTmp, 0, minOf(readTmp.size, peerNetBuf.remaining()))
+                if (n < 0) break
+                if (n > 0) peerNetBuf.put(readTmp, 0, n)
+            }
+        }
+
+        return extractHttpBody(plainOut.toByteArray())
+    }
+
+    private fun growByteBuffer(buf: ByteBuffer): ByteBuffer {
+        val next = ByteBuffer.allocate(buf.capacity() * 2)
+        buf.flip()
+        next.put(buf)
+        return next
+    }
+
+    private fun findHeaderEnd(data: ByteArray): Int {
+        for (i in 0 until data.size - 3) {
+            if (data[i] == 0x0D.toByte() &&
+                data[i + 1] == 0x0A.toByte() &&
+                data[i + 2] == 0x0D.toByte() &&
+                data[i + 3] == 0x0A.toByte()
+            ) {
+                return i + 4
+            }
+        }
+        return -1
+    }
+
+    private fun isHttpResponseComplete(raw: ByteArray): Boolean {
+        val bodyStart = findHeaderEnd(raw)
+        if (bodyStart < 0) return false
+        val headers = String(raw, 0, bodyStart, Charsets.ISO_8859_1)
+        val contentLength = parseContentLength(headers)
+        if (contentLength != null) {
+            return raw.size - bodyStart >= contentLength
+        }
+        if (headers.contains("transfer-encoding:", ignoreCase = true) &&
+            headers.contains("chunked", ignoreCase = true)
+        ) {
+            return decodeChunkedBody(raw, bodyStart) != null
+        }
+        return false
+    }
+
+    internal fun extractHttpBody(raw: ByteArray): ByteArray? {
+        val bodyStart = findHeaderEnd(raw)
+        if (bodyStart < 0) return null
+        val headers = String(raw, 0, bodyStart, Charsets.ISO_8859_1)
+        val statusLine = headers.lineSequence().firstOrNull().orEmpty()
+        if (!statusLine.contains(" 200")) return null
+
+        val contentLength = parseContentLength(headers)
+        if (contentLength != null) {
+            if (contentLength <= 0 || raw.size - bodyStart < contentLength) return null
+            return raw.copyOfRange(bodyStart, bodyStart + contentLength)
+        }
+        if (headers.contains("transfer-encoding:", ignoreCase = true) &&
+            headers.contains("chunked", ignoreCase = true)
+        ) {
+            return decodeChunkedBody(raw, bodyStart)
+        }
+        val bodyLen = raw.size - bodyStart
+        return if (bodyLen >= 12) raw.copyOfRange(bodyStart, raw.size) else null
+    }
+
+    private fun parseContentLength(headers: String): Int? {
+        for (line in headers.lineSequence()) {
+            if (line.startsWith("Content-Length:", ignoreCase = true)) {
+                return line.substringAfter(":").trim().toIntOrNull()
+            }
+        }
+        return null
+    }
+
+    private fun decodeChunkedBody(raw: ByteArray, bodyStart: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        var pos = bodyStart
+        while (pos < raw.size) {
+            var crlf = -1
+            for (i in pos until raw.size - 1) {
+                if (raw[i] == 0x0D.toByte() && raw[i + 1] == 0x0A.toByte()) {
+                    crlf = i
+                    break
+                }
+            }
+            if (crlf < 0) return null
+            val sizeHex = String(raw, pos, crlf - pos, Charsets.US_ASCII).substringBefore(';').trim()
+            val chunkSize = sizeHex.toIntOrNull(16) ?: return null
+            pos = crlf + 2
+            if (chunkSize == 0) {
+                return out.toByteArray()
+            }
+            if (pos + chunkSize + 2 > raw.size) return null
+            out.write(raw, pos, chunkSize)
+            pos += chunkSize + 2
+        }
+        return null
     }
 }
 

@@ -565,36 +565,90 @@ object FreeProxyProviderManager {
             )
         }
 
-        // Verify top 3 lowest-latency candidates with a quick handshake check
-        val finalists = reachableSorted.take(3)
-        for (finalist in finalists) {
-            val ok = runCatching { handshakeVerifier(finalist) }.getOrDefault(false)
-            if (ok) {
-                return FreeProviderBestResult(
-                    bestProfile = finalist,
-                    reachableCount = reachableSorted.size,
-                    testedCount = total,
-                    verifiedHandshake = true
-                )
-            }
+        // Verify top 10 lowest-latency candidates with real end-to-end bidirectional RX traffic
+        // (checked concurrently in batches of 4, preferring the lowest-latency verified winner).
+        val finalists = reachableSorted.take(10)
+        val verifySem = Semaphore(4)
+        val verifiedCandidates = coroutineScope {
+            finalists.map { finalist ->
+                async {
+                    verifySem.withPermit {
+                        val ok = runCatching { handshakeVerifier(finalist) }.getOrDefault(false)
+                        if (ok) finalist else null
+                    }
+                }
+            }.awaitAll().filterNotNull()
         }
 
-        // Fallback to lowest-latency TCP-reachable candidate if quick handshake timed out
+        val verifiedBest = verifiedCandidates.minByOrNull { it.latencyMs ?: Int.MAX_VALUE }
+        if (verifiedBest != null) {
+            return FreeProviderBestResult(
+                bestProfile = verifiedBest,
+                reachableCount = reachableSorted.size,
+                testedCount = total,
+                verifiedHandshake = true
+            )
+        }
+
+        // Never fall back to an unverified TCP-only node that accepts TX bytes with 0 RX response.
         return FreeProviderBestResult(
-            bestProfile = reachableSorted.first(),
+            bestProfile = null,
             reachableCount = reachableSorted.size,
             testedCount = total,
             verifiedHandshake = false
         )
     }
 
+    /**
+     * Verifies real end-to-end bidirectional data transfer (both TX and RX) through the full
+     * protocol layer (VLESS/VMess/Trojan/Shadowsocks/SOCKS4/SOCKS5/HTTP CONNECT).
+     * Rejects dead, auth-failing, or TX-only proxies that never return downstream bytes.
+     */
     private suspend fun verifyConnectorHandshake(profile: VpnProfile): Boolean =
         withContext(Dispatchers.IO) {
-            withTimeoutOrNull(3500L) {
+            withTimeoutOrNull(5500L) {
                 val connector = ProtocolConnectorFactory.create(profile, emptyList()) { true }
                 try {
                     connector.connect()
-                    connector.isHealthy()
+                    if (!connector.isHealthy()) return@withTimeoutOrNull false
+
+                    // HTTP CONNECT proxies commonly forbid port 80 and only permit port 443 tunneling
+                    if (profile.protocol == VpnProtocol.HTTP_PROXY) {
+                        val dohResp = runCatching {
+                            connector.forwardDnsOverHttps(MINIMAL_DNS_PROBE_QUERY)
+                        }.getOrNull()
+                        if (dohResp != null && dohResp.size >= 12) return@withTimeoutOrNull true
+                    }
+
+                    // Primary bidirectional probe: send HTTP GET /generate_204 and require valid HTTP RX bytes
+                    val httpTargets = listOf(
+                        "cp.cloudflare.com" to "/generate_204",
+                        "connectivitycheck.gstatic.com" to "/generate_204"
+                    )
+                    for ((host, path) in httpTargets) {
+                        val gotValidHttpRx = runCatching {
+                            val stream = connector.openTcpStream(host, 80)
+                            stream.use { s ->
+                                val req = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: BaldrProbe/1.0\r\nConnection: close\r\n\r\n"
+                                s.write(req.toByteArray(Charsets.US_ASCII))
+                                val buf = ByteArray(512)
+                                val n = s.read(buf, 0, buf.size)
+                                if (n >= 12) {
+                                    val head = String(buf, 0, n, Charsets.ISO_8859_1)
+                                    head.startsWith("HTTP/1.") || head.startsWith("HTTP/2")
+                                } else {
+                                    false
+                                }
+                            }
+                        }.getOrDefault(false)
+                        if (gotValidHttpRx) return@withTimeoutOrNull true
+                    }
+
+                    // Secondary bidirectional probe on port 443 (DoH) for proxies restricting port 80
+                    val dnsResp = runCatching {
+                        connector.forwardDnsOverHttps(MINIMAL_DNS_PROBE_QUERY)
+                    }.getOrNull()
+                    dnsResp != null && dnsResp.size >= 12
                 } catch (_: Exception) {
                     false
                 } finally {
@@ -602,6 +656,16 @@ object FreeProxyProviderManager {
                 }
             } ?: false
         }
+
+    // Standard RFC 1035 DNS A query for "one.one.one.one" (TxID=0x4242) used for lightweight RX verification
+    private val MINIMAL_DNS_PROBE_QUERY = byteArrayOf(
+        0x42, 0x42, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x03, 'o'.code.toByte(), 'n'.code.toByte(), 'e'.code.toByte(),
+        0x03, 'o'.code.toByte(), 'n'.code.toByte(), 'e'.code.toByte(),
+        0x03, 'o'.code.toByte(), 'n'.code.toByte(), 'e'.code.toByte(),
+        0x03, 'o'.code.toByte(), 'n'.code.toByte(), 'e'.code.toByte(),
+        0x00, 0x00, 0x01, 0x00, 0x01
+    )
 
     internal fun parsePlainIpPort(
         rawText: String,
@@ -689,7 +753,7 @@ object FreeProxyProviderManager {
         providerName: String,
         limit: Int = 36
     ): List<VpnProfile> {
-        val allParsed = UriConfigParser.parseBatch(rawText)
+        val allParsed = UriConfigParser.parseCompatibleBatch(rawText)
         if (allParsed.isEmpty()) return emptyList()
         val supported = allParsed.filter { profile ->
             profile.protocol in setOf(

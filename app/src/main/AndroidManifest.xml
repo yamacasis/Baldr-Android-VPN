@@ -81,7 +81,7 @@
 
         <receiver
             android:name=".widget.BaldrVpnWidgetProvider"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/widget_vpn_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />

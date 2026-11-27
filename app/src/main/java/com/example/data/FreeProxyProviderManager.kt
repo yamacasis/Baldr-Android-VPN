@@ -74,7 +74,7 @@ object FreeProxyProviderManager {
         .build()
 
     /**
-     * 15 verified live public providers.
+     * 27 verified live public providers (14 Iran-recommended V2Ray/Xray + 13 Global SOCKS5/HTTP).
      * Iran-recommended V2Ray/Xray sources are listed first and prioritize jsDelivr CDN mirrors
      * before raw.githubusercontent.com for improved reachability from restricted networks.
      */
@@ -96,6 +96,79 @@ object FreeProxyProviderManager {
                 ),
                 FreeProxyFeedSource(
                     url = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "radikal_v2ray",
+            name = "0xRadikal Top100",
+            protocolSummary = "VLESS · VMess · Trojan · SS",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Top 100 fastest verified V2Ray configs benchmarked every 15 minutes for Iran",
+            descriptionFa = "۱۰۰ کانفیگ برتر و تست‌شده V2Ray با کمترین پینگ و بروزرسانی هر ۱۵ دقیقه",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/0xRadikal/Free-v2ray-Configs@main/top100.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/top100.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "openray_sakha",
+            name = "OpenRay Verified",
+            protocolSummary = "VLESS · VMess · Trojan · SS",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Automated hourly Xray-validated proxy pipeline built for restricted networks",
+            descriptionFa = "سرورهای تست‌شده خودکار با هسته Xray و بروزرسانی ساعتی ویژه اینترنت محدود",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/sakha1370/OpenRay@main/output/all_valid_proxies.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/sakha1370/OpenRay/main/output/all_valid_proxies.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "matin_filtered",
+            name = "MatinGhanbari Filtered",
+            protocolSummary = "VLESS · Trojan · VMess",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Pre-filtered high-stability VLESS, Trojan & VMess feeds separated by protocol",
+            descriptionFa = "فیدهای فیلترشده و پایدار VLESS، Trojan و VMess به تفکیک پروتکل",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/MatinGhanbari/v2ray-configs@main/subscriptions/filtered/subs/vless.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/MatinGhanbari/v2ray-configs@main/subscriptions/filtered/subs/trojan.txt",
+                    defaultProtocol = VpnProtocol.TROJAN,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/MatinGhanbari/v2ray-configs@main/subscriptions/filtered/subs/vmess.txt",
+                    defaultProtocol = VpnProtocol.VMESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/vless.txt",
                     defaultProtocol = VpnProtocol.VLESS,
                     format = FreeProxyFeedFormat.V2RAY_SUB
                 )
@@ -144,6 +217,63 @@ object FreeProxyProviderManager {
                 FreeProxyFeedSource(
                     url = "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/trojan.txt",
                     defaultProtocol = VpnProtocol.TROJAN,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "barry_vmess",
+            name = "Barry-Far VMess & SS",
+            protocolSummary = "VMess · Shadowsocks",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Dedicated VMess AEAD & Shadowsocks CDN nodes refreshed continuously",
+            descriptionFa = "سرورهای اختصاصی VMess و Shadowsocks با پشتیبانی WebSocket و CDN",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/barry-far/V2ray-config@main/Splitted-By-Protocol/vmess.txt",
+                    defaultProtocol = VpnProtocol.VMESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/barry-far/V2ray-config@main/Splitted-By-Protocol/ss.txt",
+                    defaultProtocol = VpnProtocol.SHADOWSOCKS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vmess.txt",
+                    defaultProtocol = VpnProtocol.VMESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "argh94_v2ray",
+            name = "Argh94 AutoConfig",
+            protocolSummary = "VLESS · VMess · Trojan",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Cleaned and deduplicated V2RayAutoConfig feeds split by protocol",
+            descriptionFa = "کانفیگ‌های تمیز و فیلترشده مخزن V2RayAutoConfig به تفکیک پروتکل",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/Argh94/V2RayAutoConfig@main/configs/Vless.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/Argh94/V2RayAutoConfig@main/configs/Vmess.txt",
+                    defaultProtocol = VpnProtocol.VMESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/Argh94/V2RayAutoConfig@main/configs/Trojan.txt",
+                    defaultProtocol = VpnProtocol.TROJAN,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/Argh94/V2RayAutoConfig/main/configs/Vless.txt",
+                    defaultProtocol = VpnProtocol.VLESS,
                     format = FreeProxyFeedFormat.V2RAY_SUB
                 )
             )
@@ -258,6 +388,27 @@ object FreeProxyProviderManager {
                 )
             )
         ),
+        FreeProxyProvider(
+            id = "pawdroid_v2ray",
+            name = "Pawdroid Free",
+            protocolSummary = "VLESS · VMess · Trojan · SS",
+            isV2Ray = true,
+            iranRecommended = true,
+            descriptionEn = "Regularly updated global free V2Ray subscription mirror via jsDelivr CDN",
+            descriptionFa = "اشتراک رایگان و بروزرسانی‌شده سرورهای V2Ray جهانی روی شبکه CDN",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/Pawdroid/Free-servers@main/sub",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+                    defaultProtocol = VpnProtocol.VLESS,
+                    format = FreeProxyFeedFormat.V2RAY_SUB
+                )
+            )
+        ),
 
         // --- Global SOCKS5 / SOCKS4 / HTTP Proxy Providers ---
         FreeProxyProvider(
@@ -281,6 +432,58 @@ object FreeProxyProviderManager {
                 ),
                 FreeProxyFeedSource(
                     url = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+                    defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "clearproxy",
+            name = "ClearProxy Checked",
+            protocolSummary = "SOCKS5 · HTTP",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Continuously checked SOCKS5 & HTTP proxies validated against live services",
+            descriptionFa = "پروکسی‌های تست‌شده SOCKS5 و HTTP با بررسی پیوسته دسترسی به سرویس‌های جهانی",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/ClearProxy/checked-proxy-list@main/socks5/raw/all.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/ClearProxy/checked-proxy-list/main/socks5/raw/all.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/ClearProxy/checked-proxy-list@main/http/raw/all.txt",
+                    defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "iplocate_proxy",
+            name = "IPLocate Fresh",
+            protocolSummary = "SOCKS5 · HTTP",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Verified anonymizing SOCKS5 & HTTP proxies updated every 30 minutes",
+            descriptionFa = "پروکسی‌های ناشناس و تاییدشده SOCKS5 و HTTP با بروزرسانی هر ۳۰ دقیقه",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/iplocate/free-proxy-list@main/protocols/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/iplocate/free-proxy-list@main/protocols/http.txt",
                     defaultProtocol = VpnProtocol.HTTP_PROXY,
                     format = FreeProxyFeedFormat.PLAIN_IP_PORT
                 )
@@ -350,6 +553,58 @@ object FreeProxyProviderManager {
             )
         ),
         FreeProxyProvider(
+            id = "proxy_free",
+            name = "Proxy-Free Pool",
+            protocolSummary = "SOCKS5 · HTTP",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Speed- and uptime-tested SOCKS5 & HTTP list refreshed every 30 minutes",
+            descriptionFa = "فهرست پروکسی‌های تست‌شده بر اساس سرعت و پایداری با بروزرسانی نیم‌ساعته",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/proxy-free/free-proxy-list@main/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/proxy-free/free-proxy-list@main/http.txt",
+                    defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "fusion_proxies",
+            name = "FusionProxies",
+            protocolSummary = "SOCKS5 · HTTP",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Multi-source aggregated SOCKS5 & HTTP pool refreshed every 30 minutes",
+            descriptionFa = "مجموعه تجمیعی پروکسی‌های SOCKS5 و HTTP از چندین منبع زنده",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/FusionProxies/free-proxy-list@main/proxies/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/FusionProxies/free-proxy-list/main/proxies/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/FusionProxies/free-proxy-list@main/proxies/http.txt",
+                    defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
             id = "monosans",
             name = "Monosans",
             protocolSummary = "SOCKS5 · HTTP",
@@ -371,6 +626,53 @@ object FreeProxyProviderManager {
                 FreeProxyFeedSource(
                     url = "https://cdn.jsdelivr.net/gh/monosans/proxy-list@main/proxies/http.txt",
                     defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "murongpig",
+            name = "Proxy-Master",
+            protocolSummary = "SOCKS5 · HTTP",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Curated public SOCKS5 & HTTP proxy list updated automatically via CDN",
+            descriptionFa = "فهرست منتخب پروکسی‌های SOCKS5 و HTTP با بروزرسانی خودکار روی CDN",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/MuRongPIG/Proxy-Master@main/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/MuRongPIG/Proxy-Master@main/http.txt",
+                    defaultProtocol = VpnProtocol.HTTP_PROXY,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                )
+            )
+        ),
+        FreeProxyProvider(
+            id = "hookzof",
+            name = "Hookzof SOCKS5",
+            protocolSummary = "SOCKS5",
+            isV2Ray = false,
+            iranRecommended = false,
+            descriptionEn = "Dedicated global SOCKS5 proxy stream scraped and refreshed continuously",
+            descriptionFa = "مجموعه اختصاصی پروکسی‌های SOCKS5 جهانی با بروزرسانی پیوسته",
+            sources = listOf(
+                FreeProxyFeedSource(
+                    url = "https://cdn.jsdelivr.net/gh/hookzof/socks5_list@master/proxy.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
+                    format = FreeProxyFeedFormat.PLAIN_IP_PORT
+                ),
+                FreeProxyFeedSource(
+                    url = "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+                    defaultProtocol = VpnProtocol.SOCKS5,
                     format = FreeProxyFeedFormat.PLAIN_IP_PORT
                 )
             )

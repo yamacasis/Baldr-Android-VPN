@@ -11,6 +11,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.example.model.AppLanguage
 import com.example.model.AppThemeMode
 import com.example.model.BatteryMode
+import com.example.model.DnsPreset
 import com.example.model.TunnelMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -23,7 +24,14 @@ data class AppSettings(
     val selectedPackages: Set<String> = emptySet(),
     val batteryMode: BatteryMode = BatteryMode.ULTRA_LOW_POWER,
     val dnsPrimary: String = "1.1.1.1",
-    val dnsSecondary: String = "8.8.8.8",
+    val dnsSecondary: String = "1.0.0.1",
+    val dnsPreset: DnsPreset = DnsPreset.CLOUDFLARE,
+    val adBlockDnsEnabled: Boolean = false,
+    val customDohUrl: String = "",
+    val bypassIranEnabled: Boolean = true,
+    val bypassLanEnabled: Boolean = true,
+    val customBypassDomains: String = "",
+    val smartFailoverEnabled: Boolean = true,
     val mtu: Int = 1500,
     val autoCheckExitIp: Boolean = true,
     val killSwitchEnabled: Boolean = false,
@@ -43,6 +51,13 @@ class SettingsRepository(private val context: Context) {
         val BATTERY_MODE = stringPreferencesKey("battery_mode")
         val DNS_PRIMARY = stringPreferencesKey("dns_primary")
         val DNS_SECONDARY = stringPreferencesKey("dns_secondary")
+        val DNS_PRESET = stringPreferencesKey("dns_preset")
+        val ADBLOCK_DNS_ENABLED = booleanPreferencesKey("adblock_dns_enabled")
+        val CUSTOM_DOH_URL = stringPreferencesKey("custom_doh_url")
+        val BYPASS_IRAN_ENABLED = booleanPreferencesKey("bypass_iran_enabled")
+        val BYPASS_LAN_ENABLED = booleanPreferencesKey("bypass_lan_enabled")
+        val CUSTOM_BYPASS_DOMAINS = stringPreferencesKey("custom_bypass_domains")
+        val SMART_FAILOVER_ENABLED = booleanPreferencesKey("smart_failover_enabled")
         val MTU = intPreferencesKey("mtu")
         val AUTO_CHECK_EXIT_IP = booleanPreferencesKey("auto_check_exit_ip")
         val KILL_SWITCH_ENABLED = booleanPreferencesKey("kill_switch_enabled")
@@ -65,7 +80,16 @@ class SettingsRepository(private val context: Context) {
                 BatteryMode.entries.firstOrNull { it.name == name }
             } ?: BatteryMode.ULTRA_LOW_POWER,
             dnsPrimary = prefs[Keys.DNS_PRIMARY] ?: "1.1.1.1",
-            dnsSecondary = prefs[Keys.DNS_SECONDARY] ?: "8.8.8.8",
+            dnsSecondary = prefs[Keys.DNS_SECONDARY] ?: "1.0.0.1",
+            dnsPreset = prefs[Keys.DNS_PRESET]?.let { name ->
+                DnsPreset.entries.firstOrNull { it.name == name }
+            } ?: DnsPreset.CLOUDFLARE,
+            adBlockDnsEnabled = prefs[Keys.ADBLOCK_DNS_ENABLED] ?: false,
+            customDohUrl = prefs[Keys.CUSTOM_DOH_URL] ?: "",
+            bypassIranEnabled = prefs[Keys.BYPASS_IRAN_ENABLED] ?: true,
+            bypassLanEnabled = prefs[Keys.BYPASS_LAN_ENABLED] ?: true,
+            customBypassDomains = prefs[Keys.CUSTOM_BYPASS_DOMAINS] ?: "",
+            smartFailoverEnabled = prefs[Keys.SMART_FAILOVER_ENABLED] ?: true,
             mtu = prefs[Keys.MTU] ?: 1500,
             autoCheckExitIp = prefs[Keys.AUTO_CHECK_EXIT_IP] ?: true,
             killSwitchEnabled = prefs[Keys.KILL_SWITCH_ENABLED] ?: false,
@@ -112,7 +136,56 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit {
             it[Keys.DNS_PRIMARY] = primary.trim().ifEmpty { "1.1.1.1" }
             it[Keys.DNS_SECONDARY] = secondary.trim().ifEmpty { "8.8.8.8" }
+            it[Keys.DNS_PRESET] = DnsPreset.CUSTOM.name
         }
+    }
+
+    suspend fun setDnsPreset(preset: DnsPreset) {
+        context.dataStore.edit {
+            it[Keys.DNS_PRESET] = preset.name
+            if (preset != DnsPreset.CUSTOM) {
+                it[Keys.DNS_PRIMARY] = preset.primaryIp
+                it[Keys.DNS_SECONDARY] = preset.secondaryIp
+                it[Keys.CUSTOM_DOH_URL] = preset.dohUrl
+                if (preset.blocksAds) {
+                    it[Keys.ADBLOCK_DNS_ENABLED] = true
+                }
+            }
+        }
+    }
+
+    suspend fun setAdBlockDnsEnabled(enabled: Boolean) {
+        context.dataStore.edit {
+            it[Keys.ADBLOCK_DNS_ENABLED] = enabled
+            if (enabled) {
+                it[Keys.DNS_PRESET] = DnsPreset.ADGUARD.name
+                it[Keys.DNS_PRIMARY] = DnsPreset.ADGUARD.primaryIp
+                it[Keys.DNS_SECONDARY] = DnsPreset.ADGUARD.secondaryIp
+                it[Keys.CUSTOM_DOH_URL] = DnsPreset.ADGUARD.dohUrl
+            }
+        }
+    }
+
+    suspend fun setCustomDohUrl(url: String) {
+        context.dataStore.edit {
+            it[Keys.CUSTOM_DOH_URL] = url.trim()
+        }
+    }
+
+    suspend fun setBypassIranEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.BYPASS_IRAN_ENABLED] = enabled }
+    }
+
+    suspend fun setBypassLanEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.BYPASS_LAN_ENABLED] = enabled }
+    }
+
+    suspend fun setCustomBypassDomains(domains: String) {
+        context.dataStore.edit { it[Keys.CUSTOM_BYPASS_DOMAINS] = domains.trim() }
+    }
+
+    suspend fun setSmartFailoverEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SMART_FAILOVER_ENABLED] = enabled }
     }
 
     suspend fun setMtu(mtu: Int) {

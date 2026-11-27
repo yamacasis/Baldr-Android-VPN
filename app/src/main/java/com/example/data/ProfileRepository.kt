@@ -36,8 +36,18 @@ class ProfileRepository(
         dao.updateCountryCode(id, countryCode)
     }
 
+    suspend fun setFavorite(id: Long, isFavorite: Boolean) {
+        dao.setFavorite(id, isFavorite)
+    }
+
     suspend fun delete(id: Long) {
         dao.deleteById(id)
+    }
+
+    suspend fun deleteByIds(ids: List<Long>) {
+        if (ids.isNotEmpty()) {
+            dao.deleteByIds(ids)
+        }
     }
 
     suspend fun getSubscriptionsOnce(): List<VpnSubscription> =

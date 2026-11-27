@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.IpPrefix
 import android.net.Network
 import android.net.VpnService
 import android.os.Build
@@ -19,6 +20,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.AppDatabase
 import com.example.data.AppSettings
+import com.example.data.DataUsageTracker
 import com.example.data.ExitIpChecker
 import com.example.data.ProfileRepository
 import com.example.data.SettingsRepository
@@ -27,8 +29,11 @@ import com.example.model.ConnectionState
 import com.example.model.ExitNetworkInfo
 import com.example.model.TunnelMode
 import com.example.model.VpnProfile
+import com.example.model.VpnProtocol
 import com.example.vpn.protocols.LoadBalanceConnector
+import com.example.vpn.protocols.ProtectedSocketFactory
 import com.example.vpn.protocols.ProtocolConnectorFactory
+import com.example.vpn.protocols.SocketTunnelStream
 import com.example.vpn.protocols.UpstreamConnector
 import com.example.vpn.tun.TunSessionManager
 import kotlinx.coroutines.CoroutineScope
@@ -42,9 +47,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class NetShieldVpnService : VpnService() {
 
@@ -63,6 +70,8 @@ class NetShieldVpnService : VpnService() {
     private val healingInProgress = AtomicBoolean(false)
     private val activeNetworks = ConcurrentHashMap.newKeySet<Network>()
     @Volatile private var primaryNetwork: Network? = null
+    private val lastFlushedRxBytes = AtomicLong(0L)
+    private val lastFlushedTxBytes = AtomicLong(0L)
 
     private fun isDeviceInteractive(): Boolean {
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
@@ -208,7 +217,8 @@ class NetShieldVpnService : VpnService() {
             selectedPackages = settings.selectedPackages,
             dnsPrimary = settings.dnsPrimary,
             dnsSecondary = settings.dnsSecondary,
-            mtu = settings.mtu
+            mtu = settings.mtu,
+            bypassLanEnabled = settings.bypassLanEnabled
         )
         if (tunFd == null) {
             newConnector.close()
@@ -225,6 +235,7 @@ class NetShieldVpnService : VpnService() {
         connector = newConnector
         tunDescriptor = tunFd
 
+        val customBypassSet = SmartRoutingRules.parseCustomDomainList(settings.customBypassDomains)
         val existingMgr = sessionManager
         if (existingMgr != null && existingTun != null) {
             existingMgr.swapConnector(newConnector)
@@ -255,10 +266,29 @@ class NetShieldVpnService : VpnService() {
                 isDeviceInteractiveProvider = { isDeviceInteractive() },
                 onPausedCountChanged = { count ->
                     LowBatteryController.updatePausedBackgroundOperations(count)
-                }
+                },
+                adBlockDnsEnabled = settings.adBlockDnsEnabled,
+                customDohUrl = settings.customDohUrl,
+                bypassIranEnabled = settings.bypassIranEnabled,
+                bypassLanEnabled = settings.bypassLanEnabled,
+                customBypassDomains = customBypassSet,
+                directSocketOpener = { host, port ->
+                    val raw = ProtectedSocketFactory.openTcp(
+                        host = host,
+                        port = port,
+                        timeoutMs = 8_000,
+                        protector = { protect(it) },
+                        retryOnTransient = false
+                    )
+                    SocketTunnelStream(raw)
+                },
+                onAdBlocked = { TunnelTelemetryBus.incrementBlockedAds() },
+                onConnectionBypassed = { TunnelTelemetryBus.incrementBypassedConnections() }
             )
             manager.setLowBatteryMode(lowBatteryActive)
             sessionManager = manager
+            lastFlushedRxBytes.set(0L)
+            lastFlushedTxBytes.set(0L)
             manager.start()
         }
 
@@ -268,13 +298,25 @@ class NetShieldVpnService : VpnService() {
         TunnelTelemetryBus.setConnectionState(ConnectionState.CONNECTED, profile)
         VpnShortcutController.syncWidgetAndTile(applicationContext)
         AppAnalytics.logVpnConnected(profile.protocol.name)
+        serviceScope.launch {
+            DataUsageTracker.recordDelta(applicationContext, 0L, 0L, incrementSession = true)
+        }
         CrashReporter.setTunnelContext(
             protocol = profile.protocol.name,
             tunnelMode = settings.tunnelMode.name,
             batteryMode = settings.batteryMode.name,
             state = "CONNECTED"
         )
-        TunnelTelemetryBus.appendLog("Tunnel established (${settings.tunnelMode.name}, MTU ${settings.mtu})")
+        val routingSummary = buildList {
+            if (settings.bypassIranEnabled) add("Bypass-IR")
+            if (settings.bypassLanEnabled) add("Bypass-LAN")
+            if (settings.adBlockDnsEnabled) add("AdBlock-DNS")
+            if (settings.smartFailoverEnabled) add("Failover")
+        }.joinToString(", ")
+        TunnelTelemetryBus.appendLog(
+            "[ROUTE] Tunnel established (${settings.tunnelMode.name}, MTU ${settings.mtu}, DNS ${settings.dnsPrimary}" +
+                if (routingSummary.isNotEmpty()) ", $routingSummary)" else ")"
+        )
         val initialStatus = if (lowBatteryActive) {
             "Connected • Low-Battery Operation (${LowBatteryController.state.value.batteryPercent}%)"
         } else {
@@ -475,15 +517,75 @@ class NetShieldVpnService : VpnService() {
                 connector = freshConnector
                 sessionManager?.swapConnector(freshConnector)
                 runCatching { old?.close() }
-                TunnelTelemetryBus.appendLog("Seamless tunnel recovery succeeded")
+                TunnelTelemetryBus.appendLog("[FAILOVER] Seamless tunnel recovery succeeded")
             } else {
                 runCatching { freshConnector.close() }
                 val latestSettings = SettingsRepository(applicationContext).settingsFlow.first()
+                if (latestSettings.smartFailoverEnabled) {
+                    val switched = trySmartAutoFailover(
+                        failedProfile = latestProfile,
+                        allProfiles = allProfiles
+                    )
+                    if (switched) return
+                }
                 handleUnexpectedDisconnect(latestProfile, latestSettings)
             }
         } finally {
             healingInProgress.set(false)
         }
+    }
+
+    /**
+     * Automatically finds and hot-swaps to the fastest healthy backup server when the current
+     * server drops, keeping the TUN interface alive so apps do not lose connectivity.
+     */
+    private suspend fun trySmartAutoFailover(
+        failedProfile: VpnProfile,
+        allProfiles: List<VpnProfile>
+    ): Boolean {
+        val candidates = allProfiles
+            .filter { it.id != failedProfile.id && it.protocol != VpnProtocol.LOAD_BALANCE && it.host.isNotBlank() }
+            .sortedWith(
+                compareByDescending<VpnProfile> { it.isFavorite }
+                    .thenBy {
+                        val ms = it.latencyMs
+                        when {
+                            ms != null && ms > 0 -> ms
+                            ms == null -> 50_000
+                            else -> 99_999
+                        }
+                    }
+            )
+            .take(4)
+
+        if (candidates.isEmpty()) return false
+        TunnelTelemetryBus.appendLog("[FAILOVER] Testing ${candidates.size} backup server(s)...")
+
+        for (backup in candidates) {
+            if (manualDisconnect.get()) return false
+            val trial = ProtocolConnectorFactory.create(backup, allProfiles) { socket -> protect(socket) }
+            val ok = runCatching { trial.connect() }.isSuccess
+            if (ok && !manualDisconnect.get()) {
+                trial.setLowBatteryMode(LowBatteryController.state.value.isLowBatteryActive)
+                val old = connector
+                connector = trial
+                sessionManager?.swapConnector(trial)
+                runCatching { old?.close() }
+                SettingsRepository(applicationContext).setActiveProfileId(backup.id)
+                TunnelTelemetryBus.setConnectionState(ConnectionState.CONNECTED, backup)
+                VpnShortcutController.syncWidgetAndTile(applicationContext)
+                TunnelTelemetryBus.appendLog("[FAILOVER] Switched seamlessly to ${backup.name} (${backup.protocol.shortBadge})")
+                updateNotification(
+                    "${backup.name} • ${backup.protocol.shortBadge}",
+                    "Auto-Failover active • Connected"
+                )
+                return true
+            } else {
+                runCatching { trial.close() }
+            }
+        }
+        TunnelTelemetryBus.appendLog("[FAILOVER] No healthy backup server found")
+        return false
     }
 
     private fun registerNetworkObserver(profile: VpnProfile) {
@@ -554,7 +656,8 @@ class NetShieldVpnService : VpnService() {
         selectedPackages: Set<String>,
         dnsPrimary: String,
         dnsSecondary: String,
-        mtu: Int
+        mtu: Int,
+        bypassLanEnabled: Boolean = true
     ): ParcelFileDescriptor? {
         val builder = Builder()
             .setSession("NetShield (${profile.name})")
@@ -564,6 +667,18 @@ class NetShieldVpnService : VpnService() {
             .addDnsServer(dnsPrimary)
             .addDnsServer(dnsSecondary)
             .setBlocking(true)
+
+        if (bypassLanEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            listOf(
+                "192.168.0.0" to 16,
+                "172.16.0.0" to 12,
+                "127.0.0.0" to 8
+            ).forEach { (addr, prefixLen) ->
+                runCatching {
+                    builder.excludeRoute(IpPrefix(InetAddress.getByName(addr), prefixLen))
+                }
+            }
+        }
 
         when (tunnelMode) {
             TunnelMode.FULL_SYSTEM -> {
@@ -636,6 +751,13 @@ class NetShieldVpnService : VpnService() {
                 notifTick++
                 if (notifTick >= notifBatchTicks) {
                     notifTick = 0
+                    val deltaRx = (rx - lastFlushedRxBytes.getAndSet(rx)).coerceAtLeast(0L)
+                    val deltaTx = (tx - lastFlushedTxBytes.getAndSet(tx)).coerceAtLeast(0L)
+                    if (deltaRx > 0L || deltaTx > 0L) {
+                        serviceScope.launch {
+                            DataUsageTracker.recordDelta(applicationContext, deltaRx, deltaTx)
+                        }
+                    }
                     val title = if (policy.isLowBatteryActive) {
                         "${profile.name} • Low-Battery (${batteryState.batteryPercent}%)"
                     } else {
@@ -681,6 +803,18 @@ class NetShieldVpnService : VpnService() {
     private fun disconnectTunnel(forceCloseFirewall: Boolean) {
         TunnelTelemetryBus.setConnectionState(ConnectionState.DISCONNECTING)
         TunnelTelemetryBus.appendLog("Disconnecting tunnel...")
+        val mgrBeforeStop = sessionManager
+        if (mgrBeforeStop != null) {
+            val rx = mgrBeforeStop.totalRxBytes.get()
+            val tx = mgrBeforeStop.totalTxBytes.get()
+            val deltaRx = (rx - lastFlushedRxBytes.getAndSet(rx)).coerceAtLeast(0L)
+            val deltaTx = (tx - lastFlushedTxBytes.getAndSet(tx)).coerceAtLeast(0L)
+            if (deltaRx > 0L || deltaTx > 0L) {
+                serviceScope.launch {
+                    DataUsageTracker.recordDelta(applicationContext, deltaRx, deltaTx)
+                }
+            }
+        }
         connectJob?.cancel()
         reconnectJob?.cancel()
         telemetryJob?.cancel()

@@ -77,14 +77,18 @@ interface UpstreamConnector : Closeable {
      * Supports both DNS-over-TCP (port 53) and automatic DNS-over-HTTPS (port 443, RFC 8484)
      * fallback so free HTTP/SOCKS/V2Ray nodes that block port 53 still resolve domains reliably.
      */
-    suspend fun forwardDnsQuery(dnsQuery: ByteArray, dnsServer: String = "1.1.1.1"): ByteArray? {
-        if (preferDnsOverHttps) {
-            forwardDnsOverHttps(dnsQuery)?.let { return it }
+    suspend fun forwardDnsQuery(
+        dnsQuery: ByteArray,
+        dnsServer: String = "1.1.1.1",
+        customDohUrl: String = ""
+    ): ByteArray? {
+        if (preferDnsOverHttps || customDohUrl.isNotBlank()) {
+            forwardDnsOverHttps(dnsQuery, customDohUrl, dnsServer)?.let { return it }
             return runCatching { forwardDnsOverTcp(dnsQuery, dnsServer) }.getOrNull()
         }
         val tcpResp = runCatching { forwardDnsOverTcp(dnsQuery, dnsServer) }.getOrNull()
         if (tcpResp != null) return tcpResp
-        return forwardDnsOverHttps(dnsQuery)
+        return forwardDnsOverHttps(dnsQuery, customDohUrl, dnsServer)
     }
 
     suspend fun forwardDnsOverTcp(dnsQuery: ByteArray, dnsServer: String = "1.1.1.1"): ByteArray? {
@@ -106,14 +110,20 @@ interface UpstreamConnector : Closeable {
         }
     }
 
-    suspend fun forwardDnsOverHttps(dnsQuery: ByteArray): ByteArray? {
-        val dohEndpoints = listOf(
-            "1.1.1.1" to "cloudflare-dns.com",
-            "8.8.8.8" to "dns.google"
-        )
-        for ((ip, sni) in dohEndpoints) {
+    suspend fun forwardDnsOverHttps(
+        dnsQuery: ByteArray,
+        customDohUrl: String = "",
+        preferredDnsIp: String = "1.1.1.1"
+    ): ByteArray? {
+        val dohEndpoints = buildList {
+            val parsedCustom = DnsOverHttpsTunnel.parseDohUrl(customDohUrl, preferredDnsIp)
+            if (parsedCustom != null) add(parsedCustom)
+            add(Triple("1.1.1.1", "cloudflare-dns.com", "/dns-query"))
+            add(Triple("8.8.8.8", "dns.google", "/dns-query"))
+        }.distinct()
+        for ((targetHost, sni, path) in dohEndpoints) {
             val resp = runCatching {
-                DnsOverHttpsTunnel.query(this, dnsQuery, ip, sni)
+                DnsOverHttpsTunnel.query(this, dnsQuery, targetHost, sni, path)
             }.getOrNull()
             if (resp != null && resp.size >= 12) return resp
         }
@@ -128,15 +138,37 @@ interface UpstreamConnector : Closeable {
  */
 internal object DnsOverHttpsTunnel {
 
+    fun parseDohUrl(rawUrl: String, fallbackIp: String = ""): Triple<String, String, String>? {
+        val trimmed = rawUrl.trim()
+        if (!trimmed.startsWith("https://", ignoreCase = true)) return null
+        val withoutScheme = trimmed.substring(8)
+        val slashIdx = withoutScheme.indexOf('/')
+        val hostPart = (if (slashIdx >= 0) withoutScheme.substring(0, slashIdx) else withoutScheme)
+            .substringBefore(':')
+            .trim()
+        if (hostPart.isBlank()) return null
+        val pathPart = if (slashIdx >= 0) withoutScheme.substring(slashIdx).ifBlank { "/dns-query" } else "/dns-query"
+        val connectTarget = when (hostPart.lowercase()) {
+            "cloudflare-dns.com" -> "1.1.1.1"
+            "dns.google" -> "8.8.8.8"
+            "dns.quad9.net" -> "9.9.9.9"
+            "dns.adguard-dns.com" -> "94.140.14.14"
+            "family.adguard-dns.com" -> "94.140.14.15"
+            else -> if (fallbackIp.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$")) && hostPart == fallbackIp) fallbackIp else hostPart
+        }
+        return Triple(connectTarget, hostPart, pathPart)
+    }
+
     suspend fun query(
         connector: UpstreamConnector,
         dnsQuery: ByteArray,
         targetIp: String,
-        sniHost: String
+        sniHost: String,
+        path: String = "/dns-query"
     ): ByteArray? {
         val stream = connector.openTcpStream(targetIp, 443)
         return try {
-            queryOverStream(stream, dnsQuery, sniHost)
+            queryOverStream(stream, dnsQuery, sniHost, path = path)
         } finally {
             runCatching { stream.close() }
         }
@@ -146,7 +178,8 @@ internal object DnsOverHttpsTunnel {
         stream: TunnelStream,
         dnsQuery: ByteArray,
         sniHost: String,
-        sslContext: SSLContext = SSLContext.getDefault()
+        sslContext: SSLContext = SSLContext.getDefault(),
+        path: String = "/dns-query"
     ): ByteArray? {
         val engine = sslContext.createSSLEngine(sniHost, 443).apply {
             useClientMode = true
@@ -229,8 +262,9 @@ internal object DnsOverHttpsTunnel {
         }
 
         // 2) Send RFC 8484 HTTP/1.1 POST /dns-query request
+        val effectivePath = path.trim().ifBlank { "/dns-query" }.let { if (it.startsWith("/")) it else "/$it" }
         val reqHeader = buildString {
-            append("POST /dns-query HTTP/1.1\r\n")
+            append("POST ").append(effectivePath).append(" HTTP/1.1\r\n")
             append("Host: ").append(sniHost).append("\r\n")
             append("Content-Type: application/dns-message\r\n")
             append("Accept: application/dns-message\r\n")

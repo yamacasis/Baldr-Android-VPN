@@ -182,6 +182,10 @@ fun NetShieldApp(
     val pingAllState by viewModel.pingAllState.collectAsStateWithLifecycle()
     val freeProvidersState by viewModel.freeProvidersState.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val blockedAdsCount by viewModel.blockedAdsCount.collectAsStateWithLifecycle()
+    val bypassedConnectionsCount by viewModel.bypassedConnectionsCount.collectAsStateWithLifecycle()
+    val dataUsageSummary by viewModel.dataUsageSummary.collectAsStateWithLifecycle()
+    val isSmartConnecting by viewModel.isSmartConnecting.collectAsStateWithLifecycle()
     val remoteUpdateState by viewModel.remoteUpdateState.collectAsStateWithLifecycle()
     val fcmToken by viewModel.fcmToken.collectAsStateWithLifecycle()
     val installationId by viewModel.installationId.collectAsStateWithLifecycle()
@@ -475,6 +479,9 @@ fun NetShieldApp(
                                             lowBatteryState = lowBatteryState,
                                             isDarkTheme = isDarkTheme,
                                             lastError = lastError,
+                                            blockedAdsCount = blockedAdsCount,
+                                            bypassedConnectionsCount = bypassedConnectionsCount,
+                                            isSmartConnecting = isSmartConnecting,
                                             onToggleConnection = {
                                                 if (connectionState == ConnectionState.CONNECTED ||
                                                     connectionState == ConnectionState.CONNECTING ||
@@ -491,6 +498,26 @@ fun NetShieldApp(
                                                     }
                                                 }
                                             },
+                                            onSmartAutoConnect = {
+                                                viewModel.smartAutoConnect(
+                                                    onReadyToConnect = { winner ->
+                                                        Toast.makeText(
+                                                            context,
+                                                            strings.smartAutoConnectedToast(winner.name, winner.latencyMs ?: -1),
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                        requestVpnStart(winner)
+                                                    },
+                                                    onNoServerFound = {
+                                                        Toast.makeText(
+                                                            context,
+                                                            strings.smartAutoConnectNoServerToast,
+                                                            Toast.LENGTH_LONG
+                                                        ).show()
+                                                        navigateTo(ServersRoute)
+                                                    }
+                                                )
+                                            },
                                             onToggleTheme = {
                                                 viewModel.setThemeMode(
                                                     if (isDarkTheme) AppThemeMode.LIGHT else AppThemeMode.DARK
@@ -498,6 +525,7 @@ fun NetShieldApp(
                                             },
                                             onToggleKillSwitch = { viewModel.setKillSwitchEnabled(it) },
                                             onToggleAutoReconnect = { viewModel.setAutoReconnectEnabled(it) },
+                                            onToggleSmartFailover = { viewModel.setSmartFailoverEnabled(it) },
                                             onToggleSystemAlwaysOn = { viewModel.setSystemAlwaysOnShortcut(it) },
                                             onSwitchMultiNode = { viewModel.switchMultiVpnNode() },
                                             onRefreshExitIp = { viewModel.refreshExitIp() },
@@ -523,6 +551,9 @@ fun NetShieldApp(
                                             onSelectProfile = { id -> viewModel.selectProfile(id) },
                                             onSaveProfile = { profile -> viewModel.saveProfile(profile) },
                                             onDeleteProfile = { id -> viewModel.deleteProfile(id) },
+                                            onToggleFavorite = { id, fav -> viewModel.toggleFavorite(id, fav) },
+                                            onComputeCleanStats = { list -> viewModel.findDeadAndDuplicateStats(list) },
+                                            onCleanDeadAndDuplicates = { cb -> viewModel.cleanDeadAndDuplicateServers(cb) },
                                             onPasteFromClipboard = { raw, cb ->
                                                 viewModel.importFromClipboardText(raw, cb)
                                             },
@@ -544,6 +575,7 @@ fun NetShieldApp(
                                             },
                                             onPingProfile = { profile -> viewModel.pingProfile(profile) },
                                             onPingAllServers = { list -> viewModel.pingAllServers(list) },
+                                            onRefreshStaleLatencies = { list -> viewModel.refreshStaleLatenciesInBackground(list) },
                                             onStopPingAll = { viewModel.stopPingAll() },
                                             onBenchmarkProfile = { profile -> viewModel.benchmarkProfile(profile) },
                                             onTestAllServers = { list, autoConnect, cb ->
@@ -585,11 +617,20 @@ fun NetShieldApp(
                                             settings = settings,
                                             lowBatteryState = lowBatteryState,
                                             logs = logs,
+                                            dataUsageSummary = dataUsageSummary,
+                                            blockedAdsCount = blockedAdsCount,
                                             fcmToken = fcmToken,
                                             installationId = installationId,
                                             onSetBatteryMode = { viewModel.setBatteryMode(it) },
                                             onSetLowBatteryAutoMode = { viewModel.setLowBatteryAutoModeEnabled(it) },
                                             onSetDns = { p, s -> viewModel.setDnsServers(p, s) },
+                                            onSetDnsPreset = { viewModel.setDnsPreset(it) },
+                                            onSetAdBlockDnsEnabled = { viewModel.setAdBlockDnsEnabled(it) },
+                                            onSetCustomDohUrl = { viewModel.setCustomDohUrl(it) },
+                                            onSetBypassIranEnabled = { viewModel.setBypassIranEnabled(it) },
+                                            onSetBypassLanEnabled = { viewModel.setBypassLanEnabled(it) },
+                                            onSetCustomBypassDomains = { viewModel.setCustomBypassDomains(it) },
+                                            onClearDataUsageHistory = { viewModel.clearDataUsageHistory() },
                                             onSetMtu = { viewModel.setMtu(it) },
                                             onSetAutoCheckIp = { viewModel.setAutoCheckExitIp(it) },
                                             onSetLanguage = { viewModel.setLanguage(it) },

@@ -37,6 +37,12 @@ object TunnelTelemetryBus {
     private val _multiTunnelStatus = MutableStateFlow(MultiTunnelStatus())
     val multiTunnelStatus: StateFlow<MultiTunnelStatus> = _multiTunnelStatus.asStateFlow()
 
+    private val _blockedAdsCount = MutableStateFlow(0)
+    val blockedAdsCount: StateFlow<Int> = _blockedAdsCount.asStateFlow()
+
+    private val _bypassedConnectionsCount = MutableStateFlow(0)
+    val bypassedConnectionsCount: StateFlow<Int> = _bypassedConnectionsCount.asStateFlow()
+
     fun setConnectionState(state: ConnectionState, profile: VpnProfile? = _activeProfile.value) {
         _connectionState.value = state
         if (profile != null || state == ConnectionState.DISCONNECTED) {
@@ -47,8 +53,18 @@ object TunnelTelemetryBus {
             _exitInfo.value = ExitNetworkInfo()
             _appTraffic.value = emptyList()
             _multiTunnelStatus.value = MultiTunnelStatus()
+            _blockedAdsCount.value = 0
+            _bypassedConnectionsCount.value = 0
         }
         CrashReporter.logBreadcrumb("VPN state -> ${state.name}")
+    }
+
+    fun incrementBlockedAds() {
+        _blockedAdsCount.update { it + 1 }
+    }
+
+    fun incrementBypassedConnections() {
+        _bypassedConnectionsCount.update { it + 1 }
     }
 
     fun updateTraffic(
@@ -92,7 +108,7 @@ object TunnelTelemetryBus {
     fun setError(message: String?) {
         _lastError.value = message
         if (!message.isNullOrBlank()) {
-            appendLog("ERROR: $message")
+            appendLog("[ERR] $message")
             CrashReporter.recordError("vpn_tunnel", message)
         }
     }
@@ -101,7 +117,7 @@ object TunnelTelemetryBus {
         val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
             .format(java.util.Date())
         _logs.update { current ->
-            (current + "[$ts] $message").takeLast(80)
+            (current + "[$ts] $message").takeLast(120)
         }
     }
 

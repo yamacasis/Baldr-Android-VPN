@@ -2,6 +2,7 @@ package com.example.vpn.tun
 
 import android.system.OsConstants
 import com.example.model.AppTrafficInfo
+import com.example.vpn.SmartRoutingRules
 import com.example.vpn.protocols.TunnelStream
 import com.example.vpn.protocols.UpstreamConnector
 import kotlinx.coroutines.CoroutineScope
@@ -33,12 +34,21 @@ class TunSessionManager(
     private val uidResolver: ((protocol: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int) -> String?)? = null,
     private val dnsSecondary: String = "8.8.8.8",
     private val isDeviceInteractiveProvider: () -> Boolean = { true },
-    private val onPausedCountChanged: (Int) -> Unit = {}
+    private val onPausedCountChanged: (Int) -> Unit = {},
+    private val adBlockDnsEnabled: Boolean = false,
+    private val customDohUrl: String = "",
+    private val bypassIranEnabled: Boolean = false,
+    private val bypassLanEnabled: Boolean = false,
+    private val customBypassDomains: Set<String> = emptySet(),
+    private val directSocketOpener: (suspend (host: String, port: Int) -> TunnelStream)? = null,
+    private val onAdBlocked: () -> Unit = {},
+    private val onConnectionBypassed: () -> Unit = {}
 ) {
     val totalRxBytes = AtomicLong(0L)
     val totalTxBytes = AtomicLong(0L)
     val activeStreamCount = AtomicInteger(0)
     val pausedBackgroundCount = AtomicInteger(0)
+    private val dynamicBypassedIps = ConcurrentHashMap<String, Long>()
 
     private class MutableAppCounters {
         val bytesSent = AtomicLong(0L)
@@ -234,7 +244,7 @@ class TunSessionManager(
         val payloadLen = (ip.totalLength - payloadOffset).coerceAtLeast(0)
         if (payloadLen <= 0) return
 
-        // DNS queries (UDP port 53) are cached briefly and relayed via DNS-over-TCP over the active tunnel
+        // DNS queries (UDP port 53) are checked for AdBlock & Smart Routing, cached briefly, and relayed
         if (udp.dstPort == 53) {
             val dnsQuery = packet.copyOfRange(payloadOffset, payloadOffset + payloadLen)
             val appPkg = resolveAppPackage(OsConstants.IPPROTO_UDP, ip.srcIpStr, udp.srcPort, ip.dstIpStr, udp.dstPort)
@@ -243,11 +253,38 @@ class TunSessionManager(
             counter.lastActivityMillis = System.currentTimeMillis()
             totalTxBytes.addAndGet(payloadLen.toLong())
 
+            val queryDomain = SmartRoutingRules.extractDnsQueryDomain(dnsQuery)
+            if (adBlockDnsEnabled && queryDomain != null && SmartRoutingRules.isAdOrTrackerDomain(queryDomain)) {
+                val blockedResp = SmartRoutingRules.buildNxDomainResponse(dnsQuery)
+                if (blockedResp != null && !dropAllMode.get()) {
+                    val respPacket = PacketUtils.buildIpv4UdpPacket(
+                        srcIp = ip.dstIp,
+                        dstIp = ip.srcIp,
+                        srcPort = udp.dstPort,
+                        dstPort = udp.srcPort,
+                        payload = blockedResp
+                    )
+                    writeToTun(respPacket)
+                    onAdBlocked()
+                    onLog("[ADBLOCK] Blocked $queryDomain")
+                }
+                return
+            }
+
+            val shouldBypassDomain = queryDomain != null && SmartRoutingRules.isBypassDomain(
+                domain = queryDomain,
+                bypassIran = bypassIranEnabled,
+                customBypassDomains = customBypassDomains
+            )
+
             val cacheKey = DnsCacheHelper.extractQuestionKey(dnsQuery)
             if (cacheKey != null) {
                 val cached = dnsCache[cacheKey]
                 if (cached != null && System.currentTimeMillis() - cached.cachedAtMillis < DNS_CACHE_TTL_MS) {
                     val rewritten = DnsCacheHelper.withTransactionId(cached.response, dnsQuery[0], dnsQuery[1])
+                    if (shouldBypassDomain) {
+                        recordDynamicBypassIps(rewritten)
+                    }
                     if (!dropAllMode.get()) {
                         val respPacket = PacketUtils.buildIpv4UdpPacket(
                             srcIp = ip.dstIp,
@@ -269,13 +306,13 @@ class TunSessionManager(
             scope.launch(Dispatchers.IO) {
                 val dnsResp = dnsSemaphore.withPermit {
                     val primary = runCatching {
-                        activeConnector.forwardDnsQuery(dnsQuery, dnsPrimary)
+                        activeConnector.forwardDnsQuery(dnsQuery, dnsPrimary, customDohUrl)
                     }.getOrNull()
                     if (primary != null) {
                         primary
                     } else if (dnsSecondary.isNotBlank() && dnsSecondary != dnsPrimary) {
                         runCatching {
-                            activeConnector.forwardDnsQuery(dnsQuery, dnsSecondary)
+                            activeConnector.forwardDnsQuery(dnsQuery, dnsSecondary, customDohUrl)
                         }.getOrNull()
                     } else {
                         null
@@ -286,6 +323,10 @@ class TunSessionManager(
                     counter.failedConnections.incrementAndGet()
                     counter.lastActivityMillis = System.currentTimeMillis()
                     return@launch
+                }
+
+                if (shouldBypassDomain) {
+                    recordDynamicBypassIps(dnsResp)
                 }
 
                 if (cacheKey != null && DnsCacheHelper.isCacheableResponse(dnsResp)) {
@@ -310,6 +351,16 @@ class TunSessionManager(
                 counter.passedConnections.incrementAndGet()
                 counter.lastActivityMillis = System.currentTimeMillis()
             }
+        }
+    }
+
+    private fun recordDynamicBypassIps(dnsResponse: ByteArray) {
+        val now = System.currentTimeMillis()
+        if (dynamicBypassedIps.size > 512) {
+            dynamicBypassedIps.entries.removeIf { now - it.value > 15 * 60_000L }
+        }
+        SmartRoutingRules.extractDnsAnswerIpv4s(dnsResponse).forEach { resolvedIp ->
+            dynamicBypassedIps[resolvedIp] = now
         }
     }
 
@@ -446,19 +497,31 @@ class TunSessionManager(
                 }
 
                 try {
-                    val stream = try {
-                        activeConnector.openTcpStream(key.dstIp, key.dstPort)
-                    } catch (firstErr: Exception) {
-                        if (closed || dropAllMode.get() || !running.get()) {
-                            throw firstErr
+                    val directOpener = directSocketOpener
+                    val shouldBypassDirect = directOpener != null && SmartRoutingRules.shouldBypassIp(
+                        ip = key.dstIp,
+                        bypassLan = bypassLanEnabled,
+                        bypassIran = bypassIranEnabled,
+                        dynamicBypassedIps = dynamicBypassedIps.keys
+                    )
+                    val stream = if (shouldBypassDirect && directOpener != null) {
+                        onConnectionBypassed()
+                        directOpener.invoke(key.dstIp, key.dstPort)
+                    } else {
+                        try {
+                            activeConnector.openTcpStream(key.dstIp, key.dstPort)
+                        } catch (firstErr: Exception) {
+                            if (closed || dropAllMode.get() || !running.get()) {
+                                throw firstErr
+                            }
+                            // Retry once after brief backoff to survive mobile radio / NAT micro-blips
+                            delay(UPSTREAM_RETRY_BACKOFF_MS)
+                            val latestConnector = connector ?: throw firstErr
+                            if (closed || dropAllMode.get() || !running.get()) {
+                                throw firstErr
+                            }
+                            latestConnector.openTcpStream(key.dstIp, key.dstPort)
                         }
-                        // Retry once after brief backoff to survive mobile radio / NAT micro-blips
-                        delay(UPSTREAM_RETRY_BACKOFF_MS)
-                        val latestConnector = connector ?: throw firstErr
-                        if (closed || dropAllMode.get() || !running.get()) {
-                            throw firstErr
-                        }
-                        latestConnector.openTcpStream(key.dstIp, key.dstPort)
                     }
                     consecutiveFailures.set(0)
                     if (closed || dropAllMode.get()) {

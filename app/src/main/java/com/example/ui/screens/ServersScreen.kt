@@ -35,6 +35,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -48,12 +50,16 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkPing
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RssFeed
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -108,6 +114,7 @@ import com.example.data.LatencyTier
 import com.example.data.UriConfigParser
 import com.example.model.LoadBalanceStrategy
 import com.example.model.ProtocolGroup
+import com.example.model.ServerSortMode
 import com.example.model.TransportType
 import com.example.model.VpnProfile
 import com.example.model.VpnProtocol
@@ -118,8 +125,11 @@ import com.example.ui.BenchmarkUiState
 import com.example.ui.ClipboardPasteOutcome
 import com.example.ui.FreeProvidersUiState
 import com.example.ui.PingAllUiState
+import com.example.ui.components.QrScannerDialog
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
+import com.example.ui.theme.BaldrGold
+import com.example.ui.theme.ConnectedGreen
 import com.example.ui.theme.CoralError
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.vpn.LowBatteryState
@@ -142,6 +152,9 @@ fun ServersScreen(
     onSelectProfile: (Long) -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
     onDeleteProfile: (Long) -> Unit,
+    onToggleFavorite: (Long, Boolean) -> Unit = { _, _ -> },
+    onComputeCleanStats: (List<VpnProfile>) -> Triple<Int, Int, List<Long>> = { Triple(0, 0, emptyList()) },
+    onCleanDeadAndDuplicates: ((Int) -> Unit) -> Unit = {},
     onPasteFromClipboard: (String, (ClipboardPasteOutcome) -> Unit) -> Unit = { _, _ -> },
     onAddOrUpdateSubscription: (Long, String, String, (Boolean, String, Int) -> Unit) -> Unit = { _, _, _, _ -> },
     onRefreshSubscription: (VpnSubscription, (Boolean, String, Int) -> Unit) -> Unit = { _, _ -> },
@@ -151,6 +164,7 @@ fun ServersScreen(
     onImportConfigsOrUris: (String, String, (BackupImportStatus) -> Unit) -> Unit,
     onPingProfile: (VpnProfile) -> Unit = {},
     onPingAllServers: (List<VpnProfile>) -> Unit = {},
+    onRefreshStaleLatencies: (List<VpnProfile>) -> Unit = {},
     onStopPingAll: () -> Unit = {},
     onBenchmarkProfile: (VpnProfile) -> Unit,
     onTestAllServers: (List<VpnProfile>, Boolean, (VpnProfile) -> Unit) -> Unit,
@@ -164,8 +178,9 @@ fun ServersScreen(
     val isLowBatteryActive = lowBatteryState.isLowBatteryActive
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var selectedFilter by remember { mutableStateOf<ProtocolGroup?>(null) }
-    var sortByFastest by remember { mutableStateOf(false) }
-    var didAutoPingOnOpen by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(ServerSortMode.DEFAULT) }
+    var favoritesOnly by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
     var editingProfile by remember { mutableStateOf<VpnProfile?>(null) }
     var defaultNewProtocol by remember { mutableStateOf(VpnProtocol.VLESS) }
     var showEditorSheet by remember { mutableStateOf(false) }
@@ -175,41 +190,77 @@ fun ServersScreen(
     var subscriptionPrefillUrl by remember { mutableStateOf("") }
     var showExportDialog by remember { mutableStateOf(false) }
     var showTestDialog by remember { mutableStateOf(false) }
+    var showQrScanner by remember { mutableStateOf(false) }
+    var showCleanDialog by remember { mutableStateOf(false) }
     var autoConnectFastestChecked by remember { mutableStateOf(true) }
     var qrProfile by remember { mutableStateOf<VpnProfile?>(null) }
 
-    LaunchedEffect(profiles, isLowBatteryActive) {
-        if (!didAutoPingOnOpen &&
+    // Automatically test untested & stale servers in the background whenever entering My Servers
+    LaunchedEffect(selectedTab, profiles.size, isLowBatteryActive) {
+        if (selectedTab == 0 &&
             !isLowBatteryActive &&
             profiles.isNotEmpty() &&
             !pingAllState.isPingingAll &&
             !benchmarkState.isTestingAll
         ) {
-            didAutoPingOnOpen = true
-            val untested = profiles.filter { it.latencyMs == null }
-            if (untested.isNotEmpty()) {
-                onPingAllServers(untested)
-            }
+            onRefreshStaleLatencies(profiles)
         }
     }
 
-    val filteredProfiles = remember(profiles, selectedFilter, sortByFastest) {
-        val groupFiltered = if (selectedFilter == null) {
-            profiles
-        } else {
-            profiles.filter { it.protocol.group == selectedFilter }
+    val filteredProfiles = remember(profiles, selectedFilter, sortMode, favoritesOnly, searchQuery) {
+        val q = searchQuery.trim().lowercase()
+        val base = profiles.filter { p ->
+            val groupMatch = selectedFilter == null || p.protocol.group == selectedFilter
+            val favMatch = !favoritesOnly || p.isFavorite
+            val queryMatch = q.isEmpty() ||
+                p.name.lowercase().contains(q) ||
+                p.host.lowercase().contains(q) ||
+                p.protocol.shortBadge.lowercase().contains(q) ||
+                (p.lastCountryCode?.lowercase()?.contains(q) == true)
+            groupMatch && favMatch && queryMatch
         }
-        if (sortByFastest) {
-            ExitIpChecker.sortProfilesByFastest(groupFiltered)
-        } else {
-            groupFiltered
+        when (sortMode) {
+            ServerSortMode.PING_ASC -> ExitIpChecker.sortProfilesByFastest(base)
+            ServerSortMode.COUNTRY -> base.sortedWith(
+                compareByDescending<VpnProfile> { it.isFavorite }
+                    .thenBy { it.lastCountryCode?.takeIf { c -> c.isNotBlank() } ?: "ZZ" }
+                    .thenBy { it.name.lowercase() }
+            )
+            ServerSortMode.DEFAULT -> base.sortedByDescending { it.isFavorite }
         }
     }
+    val cleanStats = remember(profiles) { onComputeCleanStats(profiles) }
     val fastestProfileId = remember(filteredProfiles) {
         ExitIpChecker.findFastestProfileId(filteredProfiles)
     }
     val subscriptionNameById = remember(subscriptions) {
         subscriptions.associate { it.id to it.name }
+    }
+
+    val handleIncomingConfigText: (String) -> Unit = { rawText ->
+        onPasteFromClipboard(rawText) { outcome ->
+            when (outcome) {
+                is ClipboardPasteOutcome.ImportedProfiles -> {
+                    Toast.makeText(
+                        context,
+                        strings.importedWithTypesMsg(outcome.count, outcome.protocolBadges),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                is ClipboardPasteOutcome.EncryptedBackupDetected -> {
+                    importDialogPrefill = outcome.rawText
+                    showImportDialog = true
+                }
+                is ClipboardPasteOutcome.SubscriptionUrlDetected -> {
+                    subscriptionPrefillUrl = outcome.url
+                    showSubscriptionsSheet = true
+                    Toast.makeText(context, strings.subscriptionUrlDetectedMsg, Toast.LENGTH_SHORT).show()
+                }
+                ClipboardPasteOutcome.EmptyOrInvalid -> {
+                    Toast.makeText(context, strings.clipboardNoValidConfigMsg, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     val handleQuickClipboardPaste = {
@@ -218,29 +269,7 @@ fun ServersScreen(
         if (clip.isBlank()) {
             Toast.makeText(context, strings.clipboardEmptyMsg, Toast.LENGTH_SHORT).show()
         } else {
-            onPasteFromClipboard(clip) { outcome ->
-                when (outcome) {
-                    is ClipboardPasteOutcome.ImportedProfiles -> {
-                        Toast.makeText(
-                            context,
-                            strings.importedWithTypesMsg(outcome.count, outcome.protocolBadges),
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                    is ClipboardPasteOutcome.EncryptedBackupDetected -> {
-                        importDialogPrefill = outcome.rawText
-                        showImportDialog = true
-                    }
-                    is ClipboardPasteOutcome.SubscriptionUrlDetected -> {
-                        subscriptionPrefillUrl = outcome.url
-                        showSubscriptionsSheet = true
-                        Toast.makeText(context, strings.subscriptionUrlDetectedMsg, Toast.LENGTH_SHORT).show()
-                    }
-                    ClipboardPasteOutcome.EmptyOrInvalid -> {
-                        Toast.makeText(context, strings.clipboardNoValidConfigMsg, Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
+            handleIncomingConfigText(clip)
         }
     }
 
@@ -486,34 +515,47 @@ fun ServersScreen(
                         modifier = Modifier.weight(1f)
                     )
                 } else {
-                // Primary Quick Actions: 1-Tap Clipboard Paste + Subscriptions
+                // Primary Quick Actions: Paste Config, Scan QR, Subscriptions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     FilledTonalButton(
                         onClick = handleQuickClipboardPaste,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("quick_paste_clipboard_button")
                     ) {
-                        Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(strings.pasteClipboardQuickButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(strings.pasteClipboardQuickButton, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                    }
+                    FilledTonalButton(
+                        onClick = { showQrScanner = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(0.95f)
+                            .testTag("scan_qr_button")
+                    ) {
+                        Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(strings.scanQrButton, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     }
                     FilledTonalButton(
                         onClick = {
                             subscriptionPrefillUrl = ""
                             showSubscriptionsSheet = true
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("subscriptions_button")
                     ) {
-                        Icon(Icons.Filled.RssFeed, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
+                        Icon(Icons.Filled.RssFeed, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
                         Text(
                             text = if (subscriptions.isEmpty()) {
                                 strings.subscriptionsButton
@@ -521,17 +563,18 @@ fun ServersScreen(
                                 strings.subscriptionsCountButton(subscriptions.size)
                             },
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelMedium
                         )
                     }
                 }
 
-                // Export & Import Config Backup Action Row
+                // Export, Import & Clean Dead/Duplicate Action Row
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
                         onClick = {
@@ -541,27 +584,74 @@ fun ServersScreen(
                                 showExportDialog = true
                             }
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("export_configs_button")
                     ) {
-                        Icon(Icons.Filled.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(strings.exportConfigs, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Filled.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(strings.exportConfigs, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     }
                     OutlinedButton(
                         onClick = {
                             importDialogPrefill = ""
                             showImportDialog = true
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("import_configs_button")
                     ) {
-                        Icon(Icons.Filled.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(strings.importConfigs, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Filled.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(strings.importConfigs, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     }
+                    OutlinedButton(
+                        onClick = {
+                            if (cleanStats.third.isEmpty()) {
+                                Toast.makeText(context, strings.cleanServersNothingToast, Toast.LENGTH_SHORT).show()
+                            } else {
+                                showCleanDialog = true
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(0.95f)
+                            .testTag("clean_servers_button")
+                    ) {
+                        Icon(Icons.Filled.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = if (cleanStats.third.isNotEmpty()) "${strings.cleanServersButton} (${cleanStats.third.size})" else strings.cleanServersButton,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+
+                // Search bar for server name, host, protocol, or country
+                if (profiles.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text(strings.searchServersHint, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                        trailingIcon = if (searchQuery.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Filled.Close, contentDescription = strings.clearAll, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        } else null,
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp)
+                            .testTag("servers_search_input")
+                    )
                 }
 
                 // Low-Battery Operation Notice (<20%)
@@ -633,7 +723,7 @@ fun ServersScreen(
                     }
                 }
 
-                // Protocol filter chips + Fastest First sort toggle
+                // Favorites, Sort (Ping / Country), and Protocol filter chips
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -642,8 +732,24 @@ fun ServersScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     FilterChip(
-                        selected = sortByFastest,
-                        onClick = { sortByFastest = !sortByFastest },
+                        selected = favoritesOnly,
+                        onClick = { favoritesOnly = !favoritesOnly },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (favoritesOnly) Icons.Filled.Star else Icons.Outlined.StarOutline,
+                                contentDescription = null,
+                                tint = if (favoritesOnly) BaldrGold else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text(strings.filterFavoritesChip) },
+                        modifier = Modifier.testTag("filter_favorites_chip")
+                    )
+                    FilterChip(
+                        selected = sortMode == ServerSortMode.PING_ASC,
+                        onClick = {
+                            sortMode = if (sortMode == ServerSortMode.PING_ASC) ServerSortMode.DEFAULT else ServerSortMode.PING_ASC
+                        },
                         leadingIcon = {
                             Icon(
                                 imageVector = Icons.Filled.Bolt,
@@ -651,8 +757,23 @@ fun ServersScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                         },
-                        label = { Text(strings.sortByFastestChip) },
+                        label = { Text(strings.sortPingChip) },
                         modifier = Modifier.testTag("sort_fastest_chip")
+                    )
+                    FilterChip(
+                        selected = sortMode == ServerSortMode.COUNTRY,
+                        onClick = {
+                            sortMode = if (sortMode == ServerSortMode.COUNTRY) ServerSortMode.DEFAULT else ServerSortMode.COUNTRY
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Public,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text(strings.sortCountryChip) },
+                        modifier = Modifier.testTag("sort_country_chip")
                     )
                     FilterChip(
                         selected = selectedFilter == null,
@@ -754,6 +875,7 @@ fun ServersScreen(
                                 isFastest = isFastest,
                                 isTesting = isTesting,
                                 onSelect = { onSelectProfile(profile.id) },
+                                onToggleFavorite = { onToggleFavorite(profile.id, !profile.isFavorite) },
                                 onPing = { onPingProfile(profile) },
                                 onBenchmark = { onBenchmarkProfile(profile) },
                                 onShareQr = { qrProfile = profile },
@@ -902,6 +1024,49 @@ fun ServersScreen(
         )
     }
 
+    if (showQrScanner) {
+        QrScannerDialog(
+            strings = strings,
+            onQrScanned = { scannedText ->
+                showQrScanner = false
+                handleIncomingConfigText(scannedText)
+            },
+            onDismiss = { showQrScanner = false }
+        )
+    }
+
+    if (showCleanDialog) {
+        AlertDialog(
+            onDismissRequest = { showCleanDialog = false },
+            icon = { Icon(Icons.Filled.CleaningServices, contentDescription = null) },
+            title = { Text(strings.cleanServersDialogTitle) },
+            text = { Text(strings.cleanServersDialogBody(cleanStats.first, cleanStats.second)) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showCleanDialog = false
+                        onCleanDeadAndDuplicates { removedCount ->
+                            val msg = if (removedCount > 0) {
+                                strings.cleanServersDoneToast(removedCount)
+                            } else {
+                                strings.cleanServersNothingToast
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_clean_servers_button")
+                ) {
+                    Text(strings.cleanServersConfirmButton)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCleanDialog = false }) {
+                    Text(strings.cancelButton)
+                }
+            }
+        )
+    }
+
     qrProfile?.let { profile ->
         val uri = remember(profile) { UriConfigParser.exportToUri(profile) }
         val bmp = remember(uri) { UriConfigParser.generateQrBitmap(uri) }
@@ -957,6 +1122,7 @@ private fun ServerProfileCard(
     isFastest: Boolean = false,
     isTesting: Boolean,
     onSelect: () -> Unit,
+    onToggleFavorite: () -> Unit = {},
     onPing: () -> Unit,
     onBenchmark: () -> Unit,
     onShareQr: () -> Unit,
@@ -964,28 +1130,28 @@ private fun ServerProfileCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.44f)
     val latencyTier = ExitIpChecker.classifyLatency(profile.latencyMs)
     val latencyAccent = when (latencyTier) {
-        LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primary
+        LatencyTier.EXCELLENT, LatencyTier.GOOD -> ConnectedGreen
         LatencyTier.FAIR -> AmberStatus
         LatencyTier.POOR, LatencyTier.UNREACHABLE -> CoralError
         LatencyTier.UNTESTED -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val latencyContainerColor = when (latencyTier) {
-        LatencyTier.EXCELLENT, LatencyTier.GOOD -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.50f)
+        LatencyTier.EXCELLENT, LatencyTier.GOOD -> ConnectedGreen.copy(alpha = 0.16f)
         LatencyTier.FAIR -> AmberStatus.copy(alpha = 0.16f)
         LatencyTier.POOR, LatencyTier.UNREACHABLE -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
-        LatencyTier.UNTESTED -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        LatencyTier.UNTESTED -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.50f)
     }
 
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected)
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)
             else
-                MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
             contentColor = MaterialTheme.colorScheme.onSurface
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
@@ -1024,13 +1190,73 @@ private fun ServerProfileCard(
                         )
                     }
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = profile.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        // Server name with inline live Ping Latency (ms) badge directly beside it
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = profile.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = latencyContainerColor,
+                                contentColor = latencyAccent,
+                                border = BorderStroke(1.dp, latencyAccent.copy(alpha = 0.42f)),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable(enabled = !isTesting, onClick = onPing)
+                                    .testTag("ping_button_${profile.id}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    if (isTesting) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(11.dp),
+                                            strokeWidth = 1.8.dp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "...",
+                                            fontFamily = JetBrainsMonoFamily,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.testTag("latency_text_${profile.id}")
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Filled.NetworkPing,
+                                            contentDescription = strings.tapToPingLabel,
+                                            modifier = Modifier.size(12.dp),
+                                            tint = latencyAccent
+                                        )
+                                        Text(
+                                            text = when (val ms = profile.latencyMs) {
+                                                null -> "-- ms"
+                                                in Int.MIN_VALUE..0 -> strings.pingTimeoutLabel
+                                                else -> strings.latencyMs(ms)
+                                            },
+                                            fontFamily = JetBrainsMonoFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = latencyAccent,
+                                            maxLines = 1,
+                                            modifier = Modifier.testTag("latency_text_${profile.id}")
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         val subtitleText = if (profile.protocol == VpnProtocol.LOAD_BALANCE) {
                             val memberCount = profile.parsedMemberIds().size
                             val strategyLabel = when (profile.loadBalanceStrategy) {
@@ -1056,14 +1282,17 @@ private fun ServerProfileCard(
                     }
                 }
 
+                Spacer(Modifier.width(6.dp))
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     if (isFastest) {
                         Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
+                            color = ConnectedGreen.copy(alpha = 0.18f),
                             shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, ConnectedGreen.copy(alpha = 0.40f)),
                             modifier = Modifier.testTag("fastest_badge_${profile.id}")
                         ) {
                             Row(
@@ -1074,14 +1303,14 @@ private fun ServerProfileCard(
                                 Icon(
                                     imageVector = Icons.Filled.Bolt,
                                     contentDescription = strings.fastestBadge,
-                                    tint = MaterialTheme.colorScheme.primary,
+                                    tint = ConnectedGreen,
                                     modifier = Modifier.size(13.dp)
                                 )
                                 Text(
                                     text = strings.fastestBadge,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    color = ConnectedGreen
                                 )
                             }
                         }
@@ -1090,7 +1319,7 @@ private fun ServerProfileCard(
                         Icon(
                             imageVector = Icons.Filled.CheckCircle,
                             contentDescription = "Selected",
-                            tint = MaterialTheme.colorScheme.primary,
+                            tint = ConnectedGreen,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -1114,7 +1343,7 @@ private fun ServerProfileCard(
                 }
             }
 
-            // Bottom action row: Instant Ping (ms) pill + Optional Download Speed badge + Actions
+            // Bottom action row: Optional Download Speed badge + Server Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1124,52 +1353,6 @@ private fun ServerProfileCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = latencyContainerColor,
-                        contentColor = latencyAccent,
-                        border = BorderStroke(1.dp, latencyAccent.copy(alpha = 0.35f)),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable(enabled = !isTesting, onClick = onPing)
-                            .testTag("ping_button_${profile.id}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            if (isTesting) {
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                                Text(
-                                    text = strings.testingNow,
-                                    fontFamily = JetBrainsMonoFamily,
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Filled.NetworkPing,
-                                    contentDescription = strings.tapToPingLabel,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = latencyAccent
-                                )
-                                Text(
-                                    text = when (val ms = profile.latencyMs) {
-                                        null -> strings.tapToPingLabel
-                                        in Int.MIN_VALUE..0 -> strings.pingTimeoutLabel
-                                        else -> strings.latencyMs(ms)
-                                    },
-                                    fontFamily = JetBrainsMonoFamily,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 11.sp,
-                                    color = latencyAccent,
-                                    modifier = Modifier.testTag("latency_text_${profile.id}")
-                                )
-                            }
-                        }
-                    }
-
                     profile.lastSpeedBps?.let { bps ->
                         if (!isTesting) {
                             Surface(
@@ -1210,6 +1393,19 @@ private fun ServerProfileCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("favorite_button_${profile.id}")
+                    ) {
+                        Icon(
+                            imageVector = if (profile.isFavorite) Icons.Filled.Star else Icons.Outlined.StarOutline,
+                            contentDescription = strings.favoriteToggleDesc,
+                            tint = if (profile.isFavorite) BaldrGold else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     if (profile.lastSpeedBps == null) {
                         IconButton(
                             onClick = onBenchmark,

@@ -26,10 +26,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddToHomeScreen
+import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ContentCopy
@@ -37,7 +40,6 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -67,11 +69,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.AppSettings
+import com.example.data.DataUsageSummary
 import com.example.model.AppLanguage
 import com.example.model.AppThemeMode
 import com.example.model.BatteryMode
+import com.example.model.DnsPreset
+import com.example.ui.components.DataUsageHistoryCard
+import com.example.ui.components.EnhancedDiagnosticsLogsCard
 import com.example.ui.i18n.AppStrings
 import com.example.ui.theme.AmberStatus
+import com.example.ui.theme.ConnectedGreen
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.vpn.BaldrQuickTileService
 import com.example.vpn.LowBatteryState
@@ -84,11 +91,20 @@ fun SettingsScreen(
     settings: AppSettings,
     lowBatteryState: LowBatteryState = LowBatteryState(),
     logs: List<String>,
+    dataUsageSummary: DataUsageSummary = DataUsageSummary(),
+    blockedAdsCount: Int = 0,
     fcmToken: String?,
     installationId: String?,
     onSetBatteryMode: (BatteryMode) -> Unit,
     onSetLowBatteryAutoMode: (Boolean) -> Unit = {},
     onSetDns: (String, String) -> Unit,
+    onSetDnsPreset: (DnsPreset) -> Unit = {},
+    onSetAdBlockDnsEnabled: (Boolean) -> Unit = {},
+    onSetCustomDohUrl: (String) -> Unit = {},
+    onSetBypassIranEnabled: (Boolean) -> Unit = {},
+    onSetBypassLanEnabled: (Boolean) -> Unit = {},
+    onSetCustomBypassDomains: (String) -> Unit = {},
+    onClearDataUsageHistory: () -> Unit = {},
     onSetMtu: (Int) -> Unit,
     onSetAutoCheckIp: (Boolean) -> Unit,
     onSetLanguage: (AppLanguage) -> Unit,
@@ -102,6 +118,8 @@ fun SettingsScreen(
     val context = LocalContext.current
     var dns1 by remember(settings.dnsPrimary) { mutableStateOf(settings.dnsPrimary) }
     var dns2 by remember(settings.dnsSecondary) { mutableStateOf(settings.dnsSecondary) }
+    var customDoh by remember(settings.customDohUrl) { mutableStateOf(settings.customDohUrl) }
+    var customBypass by remember(settings.customBypassDomains) { mutableStateOf(settings.customBypassDomains) }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -258,7 +276,92 @@ fun SettingsScreen(
                 }
             }
 
-            // Network & DNS Card
+            // Smart Routing Card (Bypass Iran & Local LAN)
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                modifier = Modifier.testTag("smart_routing_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Filled.AltRoute, contentDescription = null, tint = ConnectedGreen)
+                        Text(strings.smartRoutingSectionTitle, style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSetBypassIranEnabled(!settings.bypassIranEnabled) }
+                            .testTag("bypass_iran_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(strings.bypassIranTitle, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                            Text(strings.bypassIranDesc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = settings.bypassIranEnabled,
+                            onCheckedChange = onSetBypassIranEnabled,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("bypass_iran_toggle")
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSetBypassLanEnabled(!settings.bypassLanEnabled) }
+                            .testTag("bypass_lan_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(strings.bypassLanTitle, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                            Text(strings.bypassLanDesc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = settings.bypassLanEnabled,
+                            onCheckedChange = onSetBypassLanEnabled,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("bypass_lan_toggle")
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = customBypass,
+                        onValueChange = {
+                            customBypass = it
+                            onSetCustomBypassDomains(it)
+                        },
+                        label = { Text(strings.customBypassDomainsLabel) },
+                        placeholder = { Text(strings.customBypassDomainsHint) },
+                        minLines = 1,
+                        maxLines = 2,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("custom_bypass_domains_input")
+                    )
+                }
+            }
+
+            // Network & DNS Card (Presets, AdBlock DNS, Custom DoH, Primary/Secondary DNS, MTU)
             Card(
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(
@@ -279,6 +382,82 @@ fun SettingsScreen(
                         Icon(Icons.Filled.NetworkCheck, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
                         Text(strings.networkSectionTitle, style = MaterialTheme.typography.titleMedium)
                     }
+
+                    Text(strings.dnsPresetLabel, style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DnsPreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = settings.dnsPreset == preset,
+                                onClick = { onSetDnsPreset(preset) },
+                                label = { Text(preset.displayName) },
+                                modifier = Modifier.testTag("dns_preset_${preset.name.lowercase()}")
+                            )
+                        }
+                    }
+
+                    // AdBlock DNS Switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSetAdBlockDnsEnabled(!settings.adBlockDnsEnabled) }
+                            .testTag("adblock_dns_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Block,
+                                    contentDescription = null,
+                                    tint = if (settings.adBlockDnsEnabled) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(strings.adBlockDnsTitle, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                            }
+                            Text(strings.adBlockDnsDesc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (settings.adBlockDnsEnabled && blockedAdsCount > 0) {
+                                Text(
+                                    text = strings.adsBlockedLiveBadge(blockedAdsCount),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = settings.adBlockDnsEnabled,
+                            onCheckedChange = onSetAdBlockDnsEnabled,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("adblock_dns_toggle")
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = customDoh,
+                        onValueChange = {
+                            customDoh = it
+                            onSetCustomDohUrl(it)
+                        },
+                        label = { Text(strings.customDohUrlLabel) },
+                        placeholder = { Text(strings.customDohUrlHint) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("custom_doh_url_input")
+                    )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedTextField(
@@ -334,6 +513,13 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // Daily & Monthly Data Usage History Card
+            DataUsageHistoryCard(
+                strings = strings,
+                summary = dataUsageSummary,
+                onResetHistory = onClearDataUsageHistory
+            )
 
             // Language Card
             Card(
@@ -638,69 +824,12 @@ fun SettingsScreen(
                 }
             }
 
-            // Diagnostics Log Viewer
-            Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.48f),
-                    contentColor = MaterialTheme.colorScheme.onSurface
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(Icons.Filled.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Text(strings.logsTitle, style = MaterialTheme.typography.titleMedium)
-                        }
-                        TextButton(onClick = onClearLogs) {
-                            Text(strings.clearLogs)
-                        }
-                    }
-
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f),
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            if (logs.isEmpty()) {
-                                Text(
-                                    text = strings.noLogsYet,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            } else {
-                                logs.takeLast(20).forEach { line ->
-                                    Text(
-                                        text = line,
-                                        fontFamily = JetBrainsMonoFamily,
-                                        fontSize = 11.sp,
-                                        lineHeight = 15.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Enhanced Filterable & Copyable Live Diagnostics Log Viewer
+            EnhancedDiagnosticsLogsCard(
+                strings = strings,
+                logs = logs,
+                onClearLogs = onClearLogs
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
         }

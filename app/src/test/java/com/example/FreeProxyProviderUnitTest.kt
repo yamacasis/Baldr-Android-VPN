@@ -105,19 +105,25 @@ class FreeProxyProviderUnitTest {
     @Test
     fun catalogHasIranRecommendedProvidersAndPrebundledAssetCoversAll() {
         val providers = FreeProxyProviderManager.providers
-        assertTrue(providers.size >= 15)
-        assertTrue(providers.count { it.iranRecommended } >= 8)
+        assertTrue("Expected at least 27 free providers", providers.size >= 27)
+        assertEquals("Provider IDs must be unique", providers.size, providers.map { it.id }.distinct().size)
+        assertTrue("Expected at least 14 Iran-recommended providers", providers.count { it.iranRecommended } >= 14)
         assertTrue(providers.all { p -> p.sources.isNotEmpty() && p.sources.all { it.url.startsWith("https://") } })
 
         val assetFile = File("src/main/assets/free_providers_default.json")
         assertTrue("Bundled default asset must exist", assetFile.exists())
         val root = Json.parseToJsonElement(assetFile.readText()).jsonObject
         val bundledProviders = root["providers"]!!.jsonObject
+        val validSchemes = listOf("vless://", "vmess://", "trojan://", "ss://", "socks5://", "socks4://", "http://", "https://")
         for (provider in providers) {
             val entry = bundledProviders[provider.id]?.jsonObject
             assertNotNull("Missing bundled snapshot for ${provider.id}", entry)
-            val uris = entry!!["uris"]!!.jsonArray
+            val uris = entry!!["uris"]!!.jsonArray.map { Json.decodeFromString<String>(it.toString()) }
             assertTrue("Bundled snapshot for ${provider.id} must have servers", uris.isNotEmpty())
+            assertTrue(
+                "Bundled snapshot for ${provider.id} must contain valid proxy URIs",
+                uris.all { uri -> validSchemes.any { uri.startsWith(it, ignoreCase = true) } }
+            )
         }
     }
 
@@ -251,5 +257,183 @@ class FreeProxyProviderUnitTest {
         fakeConnector.forwardDnsQuery(dnsPayload)
         assertTrue("Must try port 53 first", attemptedPorts.firstOrNull() == 53)
         assertTrue("Must fall back to DoH port 443 when port 53 fails", attemptedPorts.contains(443))
+    }
+
+    @Test
+    fun serverLatencyTester_prioritizesUntestedTracksFreshnessAndRunsConcurrentBatch() = runTest {
+        var nowMs = 1_000L
+        val startedIds = java.util.Collections.synchronizedList(mutableListOf<Long>())
+        val finishedIds = java.util.Collections.synchronizedList(mutableListOf<Long>())
+        val reportedResults = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+        val progressEvents = java.util.Collections.synchronizedList(mutableListOf<Pair<Int, Int>>())
+
+        val tester = com.example.data.ServerLatencyTester(
+            staleAfterMs = 60_000L,
+            clockMs = { nowMs },
+            measureFn = { profile, _ ->
+                when (profile.id) {
+                    1L -> 85
+                    2L -> null // unreachable -> should map to -1
+                    3L -> 240
+                    else -> 120
+                }
+            }
+        )
+
+        val p1Tested = VpnProfile(id = 1L, name = "Germany", protocol = VpnProtocol.VLESS, host = "de.example.com", port = 443, latencyMs = 110)
+        val p2Untested = VpnProfile(id = 2L, name = "Netherlands", protocol = VpnProtocol.VMESS, host = "nl.example.com", port = 443, latencyMs = null)
+        val p3Fresh = VpnProfile(id = 3L, name = "Finland", protocol = VpnProtocol.TROJAN, host = "fi.example.com", port = 443, latencyMs = 95)
+
+        // Mark p3 as freshly tested at t=1_000ms
+        tester.recordTestedNow(p3Fresh.id)
+        assertTrue(tester.isWithinCooldown(p3Fresh, cooldownMs = 30_000L))
+        org.junit.Assert.assertFalse(tester.isWithinCooldown(p2Untested, cooldownMs = 30_000L))
+
+        // At t=1_000ms, p2 (untested) comes first, then p1 (never recorded in session -> stale), while p3 is fresh and skipped
+        val dueInitial = tester.selectDueProfiles(listOf(p1Tested, p2Untested, p3Fresh), forceAll = false)
+        assertEquals(listOf(2L, 1L), dueInitial.map { it.id })
+
+        // Force-all includes all 3 with untested still prioritized first
+        val dueForced = tester.selectDueProfiles(listOf(p1Tested, p2Untested, p3Fresh), forceAll = true)
+        assertEquals(listOf(2L, 1L, 3L), dueForced.map { it.id })
+
+        val batchResults = tester.testBatch(
+            targets = dueInitial,
+            allProfiles = listOf(p1Tested, p2Untested, p3Fresh),
+            maxConcurrency = 2,
+            onStart = { startedIds.add(it) },
+            onResult = { id, latency -> reportedResults[id] = latency },
+            onFinishOne = { finishedIds.add(it) },
+            onProgress = { done, total -> progressEvents.add(done to total) }
+        )
+
+        assertEquals(mapOf(1L to 85, 2L to -1), batchResults)
+        assertEquals(mapOf(1L to 85, 2L to -1), reportedResults)
+        assertEquals(setOf(1L, 2L), startedIds.toSet())
+        assertEquals(setOf(1L, 2L), finishedIds.toSet())
+        assertEquals(2, progressEvents.size)
+        assertTrue(progressEvents.any { it == (2 to 2) })
+
+        // After testing p1 and p2, with updated latencyMs, none are due within 60s
+        val updatedProfiles = listOf(
+            p1Tested.copy(latencyMs = 85),
+            p2Untested.copy(latencyMs = -1),
+            p3Fresh
+        )
+        nowMs += 30_000L
+        assertTrue(tester.selectDueProfiles(updatedProfiles, forceAll = false).isEmpty())
+        org.junit.Assert.assertFalse(tester.isWithinCooldown(p3Fresh, cooldownMs = 30_000L))
+
+        // After staleness window elapses (60s), all 3 become due again
+        nowMs += 30_000L
+        assertEquals(3, tester.selectDueProfiles(updatedProfiles, forceAll = false).size)
+    }
+
+    @Test
+    fun smartRoutingRules_detectsLanIranDomainsAdsAndParsesDnsPackets() {
+        // LAN & Iranian IP bypass
+        assertTrue(com.example.vpn.SmartRoutingRules.isLocalLanIp("192.168.1.1"))
+        assertTrue(com.example.vpn.SmartRoutingRules.isLocalLanIp("10.0.0.5"))
+        assertTrue(com.example.vpn.SmartRoutingRules.isLocalLanIp("172.16.20.4"))
+        org.junit.Assert.assertFalse(com.example.vpn.SmartRoutingRules.isLocalLanIp("1.1.1.1"))
+
+        assertTrue(com.example.vpn.SmartRoutingRules.isIranianIp("5.160.10.20"))
+        assertTrue(com.example.vpn.SmartRoutingRules.isIranianIp("2.180.5.1"))
+        org.junit.Assert.assertFalse(com.example.vpn.SmartRoutingRules.isIranianIp("8.8.8.8"))
+
+        // Domain bypass (.ir + domestic Iranian sites + custom domains)
+        val custom = com.example.vpn.SmartRoutingRules.parseCustomDomainList("mybank.example.org, local.dev")
+        assertTrue(com.example.vpn.SmartRoutingRules.isBypassDomain("www.shaparak.ir", bypassIran = true, customBypassDomains = custom))
+        assertTrue(com.example.vpn.SmartRoutingRules.isBypassDomain("api.digikala.com", bypassIran = true, customBypassDomains = custom))
+        assertTrue(com.example.vpn.SmartRoutingRules.isBypassDomain("sub.mybank.example.org", bypassIran = false, customBypassDomains = custom))
+        org.junit.Assert.assertFalse(com.example.vpn.SmartRoutingRules.isBypassDomain("youtube.com", bypassIran = true, customBypassDomains = custom))
+
+        // AdBlock domain matching
+        assertTrue(com.example.vpn.SmartRoutingRules.isAdOrTrackerDomain("pagead2.googlesyndication.com"))
+        assertTrue(com.example.vpn.SmartRoutingRules.isAdOrTrackerDomain("ad.doubleclick.net"))
+        org.junit.Assert.assertFalse(com.example.vpn.SmartRoutingRules.isAdOrTrackerDomain("github.com"))
+
+        // Build minimal valid DNS query for "ads.doubleclick.net"
+        val labels = listOf("ads", "doubleclick", "net")
+        val qBytes = java.io.ByteArrayOutputStream().apply {
+            // 12-byte DNS header: ID=0x1A2B, Flags=0x0100, QDCOUNT=1
+            write(byteArrayOf(0x1A, 0x2B, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
+            labels.forEach { label ->
+                write(label.length)
+                write(label.toByteArray(Charsets.US_ASCII))
+            }
+            write(0x00) // root terminator
+            write(byteArrayOf(0x00, 0x01, 0x00, 0x01)) // QTYPE=A, QCLASS=IN
+        }.toByteArray()
+
+        val extractedDomain = com.example.vpn.SmartRoutingRules.extractDnsQueryDomain(qBytes)
+        assertEquals("ads.doubleclick.net", extractedDomain)
+
+        val nxResp = com.example.vpn.SmartRoutingRules.buildNxDomainResponse(qBytes)
+        assertNotNull(nxResp)
+        assertEquals(0x1A.toByte(), nxResp!![0])
+        assertEquals(0x2B.toByte(), nxResp[1])
+        // QR=1 (0x80) and RCODE=3 (NXDOMAIN)
+        assertTrue((nxResp[2].toInt() and 0x80) != 0)
+        assertEquals(3, nxResp[3].toInt() and 0x0F)
+
+        // Parse A-record response IPv4 extraction
+        val respWithA = qBytes.copyOf().apply {
+            this[2] = 0x81.toByte()
+            this[3] = 0x80.toByte()
+            this[7] = 0x01 // ANCOUNT = 1
+        } + byteArrayOf(
+            0xC0.toByte(), 0x0C, // Pointer to QNAME
+            0x00, 0x01, // TYPE A
+            0x00, 0x01, // CLASS IN
+            0x00, 0x00, 0x00, 0x3C, // TTL 60
+            0x00, 0x04, // RDLENGTH 4
+            5, 160.toByte(), 10, 20 // 5.160.10.20
+        )
+        val ips = com.example.vpn.SmartRoutingRules.extractDnsAnswerIpv4s(respWithA)
+        assertEquals(listOf("5.160.10.20"), ips)
+    }
+
+    @Test
+    fun dohUrlParserAndDataUsageTracker_computeAccurateResults() {
+        val parsedAdguard = com.example.vpn.protocols.DnsOverHttpsTunnel.parseDohUrl(
+            "https://dns.adguard-dns.com/dns-query"
+        )
+        assertEquals(Triple("94.140.14.14", "dns.adguard-dns.com", "/dns-query"), parsedAdguard)
+
+        val parsedCustom = com.example.vpn.protocols.DnsOverHttpsTunnel.parseDohUrl(
+            "https://dns.example.org/custom/doh"
+        )
+        assertEquals(Triple("dns.example.org", "dns.example.org", "/custom/doh"), parsedCustom)
+        org.junit.Assert.assertNull(com.example.vpn.protocols.DnsOverHttpsTunnel.parseDohUrl("http://insecure.example.com"))
+
+        // DataUsageTracker pure summary computation
+        val cal = Calendar.getInstance().apply { set(2025, Calendar.MARCH, 21, 12, 0, 0) }
+        val todayKey = com.example.data.DataUsageTracker.currentDateKey(cal.timeInMillis)
+        val calYesterday = Calendar.getInstance().apply {
+            timeInMillis = cal.timeInMillis
+            add(Calendar.DAY_OF_YEAR, -1)
+        }
+        val yesterdayKey = com.example.data.DataUsageTracker.currentDateKey(calYesterday.timeInMillis)
+        val calTwoWeeksAgo = Calendar.getInstance().apply {
+            timeInMillis = cal.timeInMillis
+            add(Calendar.DAY_OF_YEAR, -14)
+        }
+        val twoWeeksKey = com.example.data.DataUsageTracker.currentDateKey(calTwoWeeksAgo.timeInMillis)
+
+        val summary = com.example.data.DataUsageTracker.computeSummary(
+            entries = listOf(
+                com.example.data.DailyUsageEntry(todayKey, rxBytes = 1000L, txBytes = 500L),
+                com.example.data.DailyUsageEntry(yesterdayKey, rxBytes = 2000L, txBytes = 1000L),
+                com.example.data.DailyUsageEntry(twoWeeksKey, rxBytes = 5000L, txBytes = 2500L)
+            ),
+            todayKey = todayKey,
+            referenceMillis = cal.timeInMillis
+        )
+        assertEquals(1500L, summary.todayTotalBytes)
+        assertEquals(4500L, summary.weekTotalBytes)
+        assertEquals(12000L, summary.monthTotalBytes)
+        assertEquals(7, summary.last7Days.size)
+        assertEquals(todayKey, summary.last7Days.last().dateKey)
     }
 }

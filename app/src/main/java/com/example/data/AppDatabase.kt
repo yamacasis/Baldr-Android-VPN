@@ -72,8 +72,14 @@ interface ProfileDao {
     @Query("UPDATE vpn_profiles SET lastCountryCode = :countryCode WHERE id = :id")
     suspend fun updateCountryCode(id: Long, countryCode: String)
 
+    @Query("UPDATE vpn_profiles SET isFavorite = :isFavorite WHERE id = :id")
+    suspend fun setFavorite(id: Long, isFavorite: Boolean)
+
     @Query("DELETE FROM vpn_profiles WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM vpn_profiles WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
 
     @Query("DELETE FROM vpn_profiles WHERE subscriptionId = :subscriptionId")
     suspend fun deleteBySubscriptionId(subscriptionId: Long)
@@ -102,7 +108,7 @@ interface SubscriptionDao {
 
 @Database(
     entities = [VpnProfile::class, VpnSubscription::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(VpnTypeConverters::class)
@@ -149,6 +155,12 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE vpn_profiles ADD COLUMN isFavorite INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -156,7 +168,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netshield_profiles.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

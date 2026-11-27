@@ -11,6 +11,8 @@ import com.example.data.AppDatabase
 import com.example.data.AppSettings
 import com.example.data.CachedProviderEntry
 import com.example.data.ConfigBackupManager
+import com.example.data.DataUsageSummary
+import com.example.data.DataUsageTracker
 import com.example.data.ExitIpChecker
 import com.example.data.FreeProviderFetchResult
 import com.example.data.FreeProxyProvider
@@ -18,6 +20,7 @@ import com.example.data.FreeProxyProviderCache
 import com.example.data.FreeProxyProviderManager
 import com.example.data.InstalledAppsRepository
 import com.example.data.ProfileRepository
+import com.example.data.ServerLatencyTester
 import com.example.data.SettingsRepository
 import com.example.data.SubscriptionFetchResult
 import com.example.data.SubscriptionManager
@@ -27,6 +30,7 @@ import com.example.model.AppThemeMode
 import com.example.model.AppTrafficInfo
 import com.example.model.BatteryMode
 import com.example.model.ConnectionState
+import com.example.model.DnsPreset
 import com.example.model.ExitNetworkInfo
 import com.example.model.InstalledAppInfo
 import com.example.model.MultiTunnelStatus
@@ -45,11 +49,7 @@ import com.example.vpn.RemoteUpdateState
 import com.example.vpn.TunnelTelemetryBus
 import com.example.vpn.VpnShortcutController
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -59,9 +59,6 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import java.util.concurrent.atomic.AtomicInteger
 
 data class BenchmarkUiState(
     val isTestingAll: Boolean = false,
@@ -152,6 +149,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val exitInfo: StateFlow<ExitNetworkInfo> = TunnelTelemetryBus.exitInfo
     val lastError: StateFlow<String?> = TunnelTelemetryBus.lastError
     val logs: StateFlow<List<String>> = TunnelTelemetryBus.logs
+    val blockedAdsCount: StateFlow<Int> = TunnelTelemetryBus.blockedAdsCount
+    val bypassedConnectionsCount: StateFlow<Int> = TunnelTelemetryBus.bypassedConnectionsCount
+    val dataUsageSummary: StateFlow<DataUsageSummary> = DataUsageTracker.summary
 
     val remoteUpdateState: StateFlow<RemoteUpdateState> = RemoteUpdateManager.updateState
     val fcmToken: StateFlow<String?> = AppAnalytics.fcmToken
@@ -183,16 +183,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _freeProvidersState = MutableStateFlow(FreeProvidersUiState())
     val freeProvidersState: StateFlow<FreeProvidersUiState> = _freeProvidersState.asStateFlow()
 
+    private val _isSmartConnecting = MutableStateFlow(false)
+    val isSmartConnecting: StateFlow<Boolean> = _isSmartConnecting.asStateFlow()
+
     private var benchmarkAllJob: Job? = null
     private var pingAllJob: Job? = null
+    private var backgroundLatencyJob: Job? = null
     private var freeProviderJob: Job? = null
     private var backgroundFreeSyncJob: Job? = null
-    private val lastPingTimestampByProfile = ConcurrentHashMap<Long, Long>()
+    private var smartConnectJob: Job? = null
+    private val latencyTester = ServerLatencyTester()
 
     init {
         val app = getApplication<Application>()
         AppAnalytics.init(app, analyticsEnabled = true)
         LowBatteryController.startMonitoring(app)
+        viewModelScope.launch {
+            DataUsageTracker.load(app)
+        }
         viewModelScope.launch {
             val initialCache = FreeProxyProviderCache.loadAll(app)
             _freeProvidersState.update { it.copy(cachedEntries = initialCache) }
@@ -205,6 +213,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             LowBatteryController.state.collect { batteryState ->
                 if (batteryState.isLowBatteryActive) {
+                    if (backgroundLatencyJob?.isActive == true) {
+                        backgroundLatencyJob?.cancel()
+                        backgroundLatencyJob = null
+                    }
                     if (benchmarkAllJob?.isActive == true) {
                         stopBenchmarking()
                         TunnelTelemetryBus.appendLog(
@@ -217,6 +229,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             "Low-Battery Mode (${batteryState.batteryPercent}%): paused gradual free proxy list refresh"
                         )
                     }
+                }
+            }
+        }
+        // Automatically test newly added / untested servers in the background whenever the server list updates
+        viewModelScope.launch {
+            profiles.collect { currentList ->
+                if (currentList.isEmpty()) return@collect
+                val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+                if (!policy.allowAutoPingOnOpen) return@collect
+                if (pingAllJob?.isActive == true || benchmarkAllJob?.isActive == true) return@collect
+                val untested = currentList.filter { it.latencyMs == null && !_pingingIds.value.contains(it.id) }
+                if (untested.isNotEmpty() && backgroundLatencyJob?.isActive != true) {
+                    launchBackgroundLatencySweep(targets = untested, allSnapshot = currentList)
                 }
             }
         }
@@ -272,6 +297,122 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             profileRepo.delete(profileId)
             VpnShortcutController.refreshCachedServerAsync(getApplication())
+        }
+    }
+
+    fun toggleFavorite(profileId: Long, isFavorite: Boolean) {
+        viewModelScope.launch {
+            profileRepo.setFavorite(profileId, isFavorite)
+        }
+    }
+
+    /**
+     * Identifies timed-out (`latencyMs <= 0`) and duplicate (`protocol:host:port`) profiles.
+     * Keeps favorites and the lowest-latency entry among duplicates.
+     */
+    fun findDeadAndDuplicateStats(list: List<VpnProfile> = profiles.value): Triple<Int, Int, List<Long>> {
+        val deadIds = mutableSetOf<Long>()
+        val dupIds = mutableSetOf<Long>()
+        val seenKeys = mutableMapOf<String, VpnProfile>()
+
+        val prioritized = list.sortedWith(
+            compareByDescending<VpnProfile> { it.isFavorite }
+                .thenBy { val lat = it.latencyMs; if (lat != null && lat > 0) lat else Int.MAX_VALUE }
+                .thenBy { it.id }
+        )
+
+        for (p in prioritized) {
+            if (p.protocol != VpnProtocol.LOAD_BALANCE) {
+                val key = "${p.protocol.name}|${p.host.trim().lowercase()}|${p.port}|${p.usernameOrUuid.trim()}"
+                val existing = seenKeys[key]
+                if (existing != null) {
+                    dupIds.add(p.id)
+                    continue
+                } else {
+                    seenKeys[key] = p
+                }
+            }
+            val lat = p.latencyMs
+            if (lat != null && lat <= 0) {
+                deadIds.add(p.id)
+            }
+        }
+        val allIds = (deadIds + dupIds).toList()
+        return Triple(deadIds.size, dupIds.size, allIds)
+    }
+
+    fun cleanDeadAndDuplicateServers(onDone: (Int) -> Unit) {
+        viewModelScope.launch {
+            val (_, _, idsToRemove) = findDeadAndDuplicateStats(profiles.value)
+            if (idsToRemove.isNotEmpty()) {
+                profileRepo.deleteByIds(idsToRemove)
+                VpnShortcutController.refreshCachedServerAsync(getApplication())
+            }
+            onDone(idsToRemove.size)
+        }
+    }
+
+    /**
+     * One-tap Smart Auto-Connect: prioritizes favorites & lowest-latency servers, tests
+     * untested/stale candidates in parallel, and connects to the fastest reachable server.
+     */
+    fun smartAutoConnect(
+        onReadyToConnect: (VpnProfile) -> Unit,
+        onNoServerFound: () -> Unit
+    ) {
+        if (_isSmartConnecting.value) return
+        smartConnectJob?.cancel()
+        smartConnectJob = viewModelScope.launch {
+            _isSmartConnecting.value = true
+            try {
+                val all = profiles.value
+                if (all.isEmpty()) {
+                    onNoServerFound()
+                    return@launch
+                }
+                // Check already known fast reachable servers first (prefer favorites with low ping)
+                val rankedCandidates = all.sortedWith(
+                    compareByDescending<VpnProfile> { it.isFavorite }
+                        .thenBy { val lat = it.latencyMs; if (lat != null && lat > 0) lat else Int.MAX_VALUE }
+                )
+                val testPool = rankedCandidates.take(12)
+                var winner: VpnProfile? = null
+                var winnerPing = Int.MAX_VALUE
+
+                val results = latencyTester.testBatch(
+                    targets = testPool,
+                    allProfiles = all,
+                    maxConcurrency = 4,
+                    onResult = { id, ms -> profileRepo.updateLatency(id, ms) }
+                )
+
+                for (candidate in testPool) {
+                    val ms = results[candidate.id] ?: continue
+                    if (ms > 0) {
+                        val effectiveScore = if (candidate.isFavorite) (ms * 0.85).toInt() else ms
+                        val winnerScore = if (winner?.isFavorite == true) (winnerPing * 0.85).toInt() else winnerPing
+                        if (winner == null || effectiveScore < winnerScore) {
+                            winner = candidate.copy(latencyMs = ms)
+                            winnerPing = ms
+                        }
+                    }
+                }
+
+                val chosen = winner ?: rankedCandidates.firstOrNull { (it.latencyMs ?: -1) > 0 }
+                if (chosen != null) {
+                    settingsRepo.setActiveProfileId(chosen.id)
+                    VpnShortcutController.cacheLastServer(getApplication(), chosen)
+                    VpnShortcutController.syncWidgetAndTile(getApplication())
+                    TunnelTelemetryBus.appendLog(
+                        "[FAILOVER] Smart Auto-Connect selected ${chosen.name} (${chosen.latencyMs ?: -1} ms)"
+                    )
+                    onReadyToConnect(chosen)
+                } else {
+                    onNoServerFound()
+                }
+            } finally {
+                _isSmartConnecting.value = false
+            }
         }
     }
 
@@ -519,32 +660,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pingProfile(profile: VpnProfile) {
         val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
-        val now = System.currentTimeMillis()
-        val lastAt = lastPingTimestampByProfile[profile.id] ?: 0L
-        if (policy.minSinglePingCooldownMs > 0L &&
-            profile.latencyMs != null &&
-            now - lastAt < policy.minSinglePingCooldownMs
-        ) {
+        if (latencyTester.isWithinCooldown(profile, policy.minSinglePingCooldownMs)) {
             return
         }
-        lastPingTimestampByProfile[profile.id] = now
         viewModelScope.launch {
             _pingingIds.update { it + profile.id }
             try {
-                val ms = ExitIpChecker.measureLatency(profile, profiles.value)
-                profileRepo.updateLatency(profile.id, ms ?: -1)
+                val ms = latencyTester.testSingle(profile, profiles.value)
+                profileRepo.updateLatency(profile.id, ms)
             } finally {
                 _pingingIds.update { it - profile.id }
             }
         }
     }
 
+    /**
+     * Silently refreshes any untested or stale servers in the background when the user views
+     * the server list, without interrupting an active manual Ping All or Speed Benchmark.
+     */
+    fun refreshStaleLatenciesInBackground(targetProfiles: List<VpnProfile>) {
+        if (targetProfiles.isEmpty()) return
+        val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+        if (!policy.allowAutoPingOnOpen) return
+        if (pingAllJob?.isActive == true || benchmarkAllJob?.isActive == true || backgroundLatencyJob?.isActive == true) {
+            return
+        }
+        val due = latencyTester.selectDueProfiles(targetProfiles, forceAll = false)
+        if (due.isEmpty()) return
+        launchBackgroundLatencySweep(targets = due, allSnapshot = profiles.value)
+    }
+
+    private fun launchBackgroundLatencySweep(
+        targets: List<VpnProfile>,
+        allSnapshot: List<VpnProfile>
+    ) {
+        backgroundLatencyJob?.cancel()
+        backgroundLatencyJob = viewModelScope.launch {
+            val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
+            val targetIdSet = targets.map { it.id }.toSet()
+            try {
+                latencyTester.testBatch(
+                    targets = targets,
+                    allProfiles = allSnapshot,
+                    maxConcurrency = policy.maxPingConcurrency.coerceAtLeast(1),
+                    pacingDelayMs = policy.pingPacingDelayMs,
+                    onStart = { id -> _pingingIds.update { it + id } },
+                    onResult = { id, ms -> profileRepo.updateLatency(id, ms) },
+                    onFinishOne = { id -> _pingingIds.update { it - id } }
+                )
+            } finally {
+                _pingingIds.update { it - targetIdSet }
+            }
+        }
+    }
+
     fun pingAllServers(targetProfiles: List<VpnProfile>) {
         if (targetProfiles.isEmpty()) return
+        backgroundLatencyJob?.cancel()
+        backgroundLatencyJob = null
         pingAllJob?.cancel()
         pingAllJob = viewModelScope.launch {
-            val total = targetProfiles.size
-            val completed = AtomicInteger(0)
+            val orderedTargets = latencyTester.selectDueProfiles(targetProfiles, forceAll = true)
+            val total = orderedTargets.size
             _pingAllState.value = PingAllUiState(
                 isPingingAll = true,
                 completedCount = 0,
@@ -552,36 +729,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             val allSnapshot = profiles.value
             val policy = LowBatteryController.resolvePolicy(lowBatteryState.value, settings.value.batteryMode)
-            val semaphore = Semaphore(permits = policy.maxPingConcurrency.coerceAtLeast(1))
-            val pacingDelayMs = policy.pingPacingDelayMs
+            val targetIdSet = orderedTargets.map { it.id }.toSet()
             try {
-                coroutineScope {
-                    targetProfiles.mapIndexed { index, profile ->
-                        async {
-                            semaphore.withPermit {
-                                if (pacingDelayMs > 0L && index > 0) {
-                                    delay(pacingDelayMs)
-                                }
-                                _pingingIds.update { it + profile.id }
-                                try {
-                                    lastPingTimestampByProfile[profile.id] = System.currentTimeMillis()
-                                    val ms = ExitIpChecker.measureLatency(profile, allSnapshot)
-                                    profileRepo.updateLatency(profile.id, ms ?: -1)
-                                } finally {
-                                    _pingingIds.update { it - profile.id }
-                                    val done = completed.incrementAndGet()
-                                    _pingAllState.value = PingAllUiState(
-                                        isPingingAll = true,
-                                        completedCount = done,
-                                        totalCount = total
-                                    )
-                                }
-                            }
-                        }
-                    }.awaitAll()
-                }
+                latencyTester.testBatch(
+                    targets = orderedTargets,
+                    allProfiles = allSnapshot,
+                    maxConcurrency = policy.maxPingConcurrency.coerceAtLeast(1),
+                    pacingDelayMs = policy.pingPacingDelayMs,
+                    onStart = { id -> _pingingIds.update { it + id } },
+                    onResult = { id, ms -> profileRepo.updateLatency(id, ms) },
+                    onFinishOne = { id -> _pingingIds.update { it - id } },
+                    onProgress = { done, count ->
+                        _pingAllState.value = PingAllUiState(
+                            isPingingAll = true,
+                            completedCount = done,
+                            totalCount = count
+                        )
+                    }
+                )
             } finally {
-                val targetIdSet = targetProfiles.map { it.id }.toSet()
                 _pingingIds.update { it - targetIdSet }
                 _pingAllState.value = PingAllUiState()
             }
@@ -589,6 +755,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopPingAll() {
+        backgroundLatencyJob?.cancel()
+        backgroundLatencyJob = null
         pingAllJob?.cancel()
         pingAllJob = null
         _pingingIds.value = emptySet()
@@ -1039,6 +1207,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setDnsServers(primary: String, secondary: String) {
         viewModelScope.launch { settingsRepo.setDnsServers(primary, secondary) }
+    }
+
+    fun setDnsPreset(preset: DnsPreset) {
+        viewModelScope.launch { settingsRepo.setDnsPreset(preset) }
+    }
+
+    fun setAdBlockDnsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setAdBlockDnsEnabled(enabled) }
+    }
+
+    fun setCustomDohUrl(url: String) {
+        viewModelScope.launch { settingsRepo.setCustomDohUrl(url) }
+    }
+
+    fun setBypassIranEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setBypassIranEnabled(enabled) }
+    }
+
+    fun setBypassLanEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setBypassLanEnabled(enabled) }
+    }
+
+    fun setCustomBypassDomains(domains: String) {
+        viewModelScope.launch { settingsRepo.setCustomBypassDomains(domains) }
+    }
+
+    fun setSmartFailoverEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setSmartFailoverEnabled(enabled) }
+    }
+
+    fun clearDataUsageHistory() {
+        viewModelScope.launch { DataUsageTracker.clearHistory(getApplication()) }
     }
 
     fun setMtu(mtu: Int) {

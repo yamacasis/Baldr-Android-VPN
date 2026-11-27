@@ -57,3 +57,56 @@ enum class AppThemeMode {
     DARK,
     LIGHT
 }
+
+enum class DnsPreset(
+    val displayName: String,
+    val primaryIp: String,
+    val secondaryIp: String,
+    val dohUrl: String,
+    val blocksAds: Boolean = false
+) {
+    CLOUDFLARE(
+        displayName = "Cloudflare",
+        primaryIp = "1.1.1.1",
+        secondaryIp = "1.0.0.1",
+        dohUrl = "https://cloudflare-dns.com/dns-query"
+    ),
+    GOOGLE(
+        displayName = "Google",
+        primaryIp = "8.8.8.8",
+        secondaryIp = "8.8.4.4",
+        dohUrl = "https://dns.google/dns-query"
+    ),
+    QUAD9(
+        displayName = "Quad9",
+        primaryIp = "9.9.9.9",
+        secondaryIp = "149.112.112.112",
+        dohUrl = "https://dns.quad9.net/dns-query"
+    ),
+    ADGUARD(
+        displayName = "AdGuard AdBlock",
+        primaryIp = "94.140.14.14",
+        secondaryIp = "94.140.15.15",
+        dohUrl = "https://dns.adguard-dns.com/dns-query",
+        blocksAds = true
+    ),
+    ADGUARD_FAMILY(
+        displayName = "AdGuard Family",
+        primaryIp = "94.140.14.15",
+        secondaryIp = "94.140.15.16",
+        dohUrl = "https://family.adguard-dns.com/dns-query",
+        blocksAds = true
+    ),
+    CUSTOM(
+        displayName = "Custom",
+        primaryIp = "1.1.1.1",
+        secondaryIp = "8.8.8.8",
+        dohUrl = ""
+    )
+}
+
+enum class ServerSortMode {
+    DEFAULT,
+    PING_ASC,
+    COUNTRY
+}

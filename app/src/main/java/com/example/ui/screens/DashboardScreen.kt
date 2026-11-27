@@ -34,11 +34,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddToHomeScreen
+import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.ExpandLess
@@ -135,10 +138,15 @@ fun DashboardScreen(
     lowBatteryState: LowBatteryState = LowBatteryState(),
     isDarkTheme: Boolean,
     lastError: String?,
+    blockedAdsCount: Int = 0,
+    bypassedConnectionsCount: Int = 0,
+    isSmartConnecting: Boolean = false,
     onToggleConnection: () -> Unit,
+    onSmartAutoConnect: () -> Unit = {},
     onToggleTheme: () -> Unit,
     onToggleKillSwitch: (Boolean) -> Unit,
     onToggleAutoReconnect: (Boolean) -> Unit,
+    onToggleSmartFailover: (Boolean) -> Unit = {},
     onToggleSystemAlwaysOn: (Boolean) -> Unit,
     onSwitchMultiNode: () -> Unit = {},
     onRefreshExitIp: () -> Unit,
@@ -583,6 +591,97 @@ fun DashboardScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+
+                    // 1-Tap Smart Auto-Connect CTA when disconnected
+                    if (!isConnected && connectionState != ConnectionState.CONNECTING && connectionState != ConnectionState.RECONNECTING) {
+                        FilledTonalButton(
+                            onClick = onSmartAutoConnect,
+                            enabled = !isSmartConnecting,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("smart_auto_connect_button")
+                        ) {
+                            if (isSmartConnecting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(Modifier.size(8.dp))
+                                Text(strings.smartAutoConnectingLabel, maxLines = 1)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.size(8.dp))
+                                Text(strings.smartAutoConnectButton, maxLines = 1)
+                            }
+                        }
+                    }
+
+                    // Live AdBlock DNS & Smart Routing Bypass status badges when connected
+                    if (isConnected && (settings.adBlockDnsEnabled || settings.bypassIranEnabled || settings.bypassLanEnabled)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (settings.adBlockDnsEnabled) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)),
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("dashboard_adblock_badge")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Block,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = strings.adsBlockedLiveBadge(blockedAdsCount),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
+                            }
+                            if (settings.bypassIranEnabled || settings.bypassLanEnabled) {
+                                Surface(
+                                    color = ConnectedGreen.copy(alpha = 0.14f),
+                                    border = BorderStroke(1.dp, ConnectedGreen.copy(alpha = 0.35f)),
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("dashboard_bypass_badge")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.AltRoute,
+                                            contentDescription = null,
+                                            tint = ConnectedGreen,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = strings.bypassedLiveBadge(bypassedConnectionsCount),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = ConnectedGreen
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Collapsible Server Info & Download/Upload Speed Details (collapsed by default; tap to expand)
                     Surface(
@@ -1053,6 +1152,45 @@ fun DashboardScreen(
                                     modifier = Modifier
                                         .minimumInteractiveComponentSize()
                                         .testTag("auto_reconnect_toggle")
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f))
+
+                            // Option 3: Smart Auto-Failover
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onToggleSmartFailover(!settings.smartFailoverEnabled) }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("smart_failover_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = if (settings.smartFailoverEnabled) ConnectedGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = strings.smartFailoverTitle,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = strings.smartFailoverDesc,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = settings.smartFailoverEnabled,
+                                    onCheckedChange = onToggleSmartFailover,
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("smart_failover_toggle")
                                 )
                             }
 

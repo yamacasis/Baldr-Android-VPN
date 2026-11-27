@@ -92,6 +92,9 @@ fun FreeProvidersTab(
         }
     }
 
+    val iranCount = remember(allProviders) { allProviders.count { it.iranRecommended } }
+    val proxyCount = remember(allProviders) { allProviders.count { !it.isV2Ray } }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -128,7 +131,7 @@ fun FreeProvidersTab(
                             modifier = Modifier.size(16.dp)
                         )
                     },
-                    label = { Text(strings.freeProviderFilterIran) },
+                    label = { Text("${strings.freeProviderFilterIran} ($iranCount)") },
                     modifier = Modifier.testTag("free_filter_iran")
                 )
                 FilterChip(
@@ -141,7 +144,7 @@ fun FreeProvidersTab(
                             modifier = Modifier.size(16.dp)
                         )
                     },
-                    label = { Text(strings.freeProviderFilterProxy) },
+                    label = { Text("${strings.freeProviderFilterProxy} ($proxyCount)") },
                     modifier = Modifier.testTag("free_filter_proxy")
                 )
             }

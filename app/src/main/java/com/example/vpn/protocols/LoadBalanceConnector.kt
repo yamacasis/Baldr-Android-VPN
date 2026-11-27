@@ -206,14 +206,18 @@ class LoadBalanceConnector(
             )
         }
 
-    override suspend fun forwardDnsQuery(dnsQuery: ByteArray, dnsServer: String): ByteArray? =
+    override suspend fun forwardDnsQuery(
+        dnsQuery: ByteArray,
+        dnsServer: String,
+        customDohUrl: String
+    ): ByteArray? =
         withContext(Dispatchers.IO) {
             if (closed.get()) return@withContext null
             val candidates = orderedCandidates()
             for (node in candidates) {
                 val startNs = System.nanoTime()
                 val resp = runCatching {
-                    node.connector.forwardDnsQuery(dnsQuery, dnsServer)
+                    node.connector.forwardDnsQuery(dnsQuery, dnsServer, customDohUrl)
                 }.getOrNull()
                 if (resp != null) {
                     val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)

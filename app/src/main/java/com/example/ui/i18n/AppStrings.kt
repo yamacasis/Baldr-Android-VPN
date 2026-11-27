@@ -267,6 +267,63 @@ interface AppStrings {
     val serverSpeedDetailsTitle: String
     val quickWidgetShortButton: String
     val controlCenterShortButton: String
+    // Feature 1: Smart Routing (Iran & LAN Bypass)
+    val smartRoutingSectionTitle: String
+    val bypassIranTitle: String
+    val bypassIranDesc: String
+    val bypassLanTitle: String
+    val bypassLanDesc: String
+    val customBypassDomainsLabel: String
+    val customBypassDomainsHint: String
+    val bypassedLiveBadge: (Int) -> String
+    // Feature 2: Smart Auto-Connect & Auto-Failover
+    val smartAutoConnectButton: String
+    val smartAutoConnectingLabel: String
+    val smartAutoConnectNoServerToast: String
+    val smartAutoConnectedToast: (String, Int) -> String
+    val smartFailoverTitle: String
+    val smartFailoverDesc: String
+    // Feature 3: Custom DNS / DoH Presets & AdBlock DNS
+    val dnsPresetLabel: String
+    val adBlockDnsTitle: String
+    val adBlockDnsDesc: String
+    val adsBlockedLiveBadge: (Int) -> String
+    val customDohUrlLabel: String
+    val customDohUrlHint: String
+    // Feature 4: Search, Sort, Favorites & Server Cleaner
+    val searchServersHint: String
+    val filterFavoritesChip: String
+    val sortDefaultChip: String
+    val sortPingChip: String
+    val sortCountryChip: String
+    val favoriteToggleDesc: String
+    val cleanServersButton: String
+    val cleanServersDialogTitle: String
+    val cleanServersDialogBody: (Int, Int) -> String
+    val cleanServersConfirmButton: String
+    val cleanServersNothingToast: String
+    val cleanServersDoneToast: (Int) -> String
+    // Feature 5: Live Camera QR Scanner
+    val scanQrButton: String
+    val qrScannerTitle: String
+    val qrScannerSubtitle: String
+    val qrCameraPermissionNeeded: String
+    val qrGrantPermissionButton: String
+    val qrTorchToggleDesc: String
+    // Feature 6: Data Usage History & Enhanced Live Logs
+    val dataUsageSectionTitle: String
+    val dataUsageToday: String
+    val dataUsageWeek: String
+    val dataUsageMonth: String
+    val dataUsageLast7Days: String
+    val dataUsageResetButton: String
+    val logFilterAll: String
+    val logFilterErrors: String
+    val logFilterRouting: String
+    val logFilterFailover: String
+    val logFilterAdBlock: String
+    val copyLogsButton: String
+    val logsCopiedToast: String
 }
 
 object FarsiStrings : AppStrings {
@@ -539,6 +596,67 @@ object FarsiStrings : AppStrings {
     override val serverSpeedDetailsTitle = "جزئیات سرور و سرعت"
     override val quickWidgetShortButton = "ویجت اتصال سریع"
     override val controlCenterShortButton = "دکمه کنترل سنتر"
+    // Feature 1: Smart Routing (Iran & LAN Bypass)
+    override val smartRoutingSectionTitle = "مسیریابی هوشمند (دور زدن ایران و شبکه داخلی)"
+    override val bypassIranTitle = "عبور مستقیم سایت‌ها و آی‌پی‌های ایران"
+    override val bypassIranDesc = "دامنه‌های .ir، بانک‌ها و سرویس‌های داخلی ایران بدون VPN و با سرعت کامل باز شوند"
+    override val bypassLanTitle = "دور زدن شبکه داخلی (LAN)"
+    override val bypassLanDesc = "آی‌پی‌های محلی (روتر، پرینتر، مودم 192.168.x.x) مستقیم بدون تونل باز شوند"
+    override val customBypassDomainsLabel = "دامنه‌های دلخواه بدون VPN (جداشده با ویرگول)"
+    override val customBypassDomainsHint = "مثلاً: digikala.com, snapp.ir, bankmellat.ir"
+    override val bypassedLiveBadge: (Int) -> String = { n -> "عبور مستقیم: $n" }
+    // Feature 2: Smart Auto-Connect & Auto-Failover
+    override val smartAutoConnectButton = "اتصال هوشمند به سریع‌ترین"
+    override val smartAutoConnectingLabel = "در حال یافتن بهترین سرور..."
+    override val smartAutoConnectNoServerToast = "سرور فعالی پیدا نشد؛ ابتدا سرور اضافه کنید یا از پروکسی رایگان استفاده نمایید"
+    override val smartAutoConnectedToast: (String, Int) -> String = { name, ms ->
+        if (ms > 0) "اتصال هوشمند به $name ($ms ms)" else "اتصال هوشمند به $name"
+    }
+    override val smartFailoverTitle = "تعویض هوشمند سرور (Auto-Failover)"
+    override val smartFailoverDesc = "در صورت افت یا قطع سرور فعلی، خودکار به بهترین سرور پشتیبان بدون قطع تونل سوئیچ شود"
+    // Feature 3: Custom DNS / DoH Presets & AdBlock DNS
+    override val dnsPresetLabel = "پروفایل آماده DNS / DoH"
+    override val adBlockDnsTitle = "مسدودسازی تبلیغات و ردیاب‌ها (AdBlock DNS)"
+    override val adBlockDnsDesc = "فیلتر خودکار دامنه‌های تبلیغاتی و ردیاب در سطح DNS درون تونل"
+    override val adsBlockedLiveBadge: (Int) -> String = { n -> "تبلیغ مسدودشده: $n" }
+    override val customDohUrlLabel = "آدرس DNS-over-HTTPS (اختیاری)"
+    override val customDohUrlHint = "https://dns.adguard-dns.com/dns-query"
+    // Feature 4: Search, Sort, Favorites & Server Cleaner
+    override val searchServersHint = "جستجوی نام، آدرس یا کشور..."
+    override val filterFavoritesChip = "محبوب‌ها"
+    override val sortDefaultChip = "پیش‌فرض"
+    override val sortPingChip = "کمترین پینگ"
+    override val sortCountryChip = "کشور"
+    override val favoriteToggleDesc = "افزودن یا حذف از محبوب‌ها"
+    override val cleanServersButton = "پاکسازی"
+    override val cleanServersDialogTitle = "پاکسازی سرورهای ازکارافتاده و تکراری"
+    override val cleanServersDialogBody: (Int, Int) -> String = { dead, dup ->
+        "تعداد $dead سرور ازکارافتاده (تایم‌اوت) و $dup سرور تکراری پیدا شد. حذف شوند؟"
+    }
+    override val cleanServersConfirmButton = "حذف همه"
+    override val cleanServersNothingToast = "سرور ازکارافتاده یا تکراری یافت نشد"
+    override val cleanServersDoneToast: (Int) -> String = { n -> "$n سرور ازکارافتاده/تکراری پاکسازی شد" }
+    // Feature 5: Live Camera QR Scanner
+    override val scanQrButton = "اسکن QR"
+    override val qrScannerTitle = "اسکن کد QR کانفیگ یا سابسکریپشن"
+    override val qrScannerSubtitle = "دوربین را روی کد QR لینک vless، vmess، trojan، ss یا سابسکریپشن نگه دارید"
+    override val qrCameraPermissionNeeded = "برای اسکن کد QR نیاز به دسترسی دوربین است"
+    override val qrGrantPermissionButton = "اجازه دسترسی دوربین"
+    override val qrTorchToggleDesc = "روشن/خاموش کردن فلش"
+    // Feature 6: Data Usage History & Enhanced Live Logs
+    override val dataUsageSectionTitle = "آمار مصرف اینترنت (روزانه و ماهانه)"
+    override val dataUsageToday = "امروز"
+    override val dataUsageWeek = "۷ روز اخیر"
+    override val dataUsageMonth = "۳۰ روز اخیر"
+    override val dataUsageLast7Days = "نمودار مصرف ۷ روز گذشته"
+    override val dataUsageResetButton = "صفر کردن آمار"
+    override val logFilterAll = "همه"
+    override val logFilterErrors = "خطاها"
+    override val logFilterRouting = "مسیریابی"
+    override val logFilterFailover = "سوئیچ خودکار"
+    override val logFilterAdBlock = "ضدتبلیغ"
+    override val copyLogsButton = "کپی لاگ"
+    override val logsCopiedToast = "گزارش اتصال در کلیپ‌بورد کپی شد"
 }
 
 object EnglishStrings : AppStrings {
@@ -811,4 +929,65 @@ object EnglishStrings : AppStrings {
     override val serverSpeedDetailsTitle = "Server & Speed Details"
     override val quickWidgetShortButton = "Quick Widget"
     override val controlCenterShortButton = "Control Center"
+    // Feature 1: Smart Routing (Iran & LAN Bypass)
+    override val smartRoutingSectionTitle = "Smart Routing (Iran & LAN Bypass)"
+    override val bypassIranTitle = "Bypass Iranian Domains & IPs"
+    override val bypassIranDesc = "Open .ir sites, domestic banks, and Iranian IPs directly outside VPN"
+    override val bypassLanTitle = "Bypass Local Network (LAN)"
+    override val bypassLanDesc = "Keep local routers, printers, and 192.168.x.x devices direct"
+    override val customBypassDomainsLabel = "Custom Bypass Domains (comma-separated)"
+    override val customBypassDomainsHint = "e.g. digikala.com, snapp.ir, bankmellat.ir"
+    override val bypassedLiveBadge: (Int) -> String = { n -> "Direct: $n" }
+    // Feature 2: Smart Auto-Connect & Auto-Failover
+    override val smartAutoConnectButton = "Smart Auto-Connect"
+    override val smartAutoConnectingLabel = "Finding fastest server..."
+    override val smartAutoConnectNoServerToast = "No working server found — add a server or use Free Proxies"
+    override val smartAutoConnectedToast: (String, Int) -> String = { name, ms ->
+        if (ms > 0) "Smart connected to $name ($ms ms)" else "Smart connected to $name"
+    }
+    override val smartFailoverTitle = "Smart Auto-Failover"
+    override val smartFailoverDesc = "Automatically switch to the best backup server if the active node drops"
+    // Feature 3: Custom DNS / DoH Presets & AdBlock DNS
+    override val dnsPresetLabel = "DNS / DoH Preset"
+    override val adBlockDnsTitle = "Ad & Tracker Blocker (DNS)"
+    override val adBlockDnsDesc = "Block ad networks and trackers inside the tunnel DNS resolver"
+    override val adsBlockedLiveBadge: (Int) -> String = { n -> "Ads Blocked: $n" }
+    override val customDohUrlLabel = "Custom DNS-over-HTTPS URL (Optional)"
+    override val customDohUrlHint = "https://dns.adguard-dns.com/dns-query"
+    // Feature 4: Search, Sort, Favorites & Server Cleaner
+    override val searchServersHint = "Search name, host, or country..."
+    override val filterFavoritesChip = "Favorites"
+    override val sortDefaultChip = "Default"
+    override val sortPingChip = "Lowest Ping"
+    override val sortCountryChip = "Country"
+    override val favoriteToggleDesc = "Toggle favorite"
+    override val cleanServersButton = "Clean"
+    override val cleanServersDialogTitle = "Clean Dead & Duplicate Servers"
+    override val cleanServersDialogBody: (Int, Int) -> String = { dead, dup ->
+        "Found $dead timed-out server(s) and $dup duplicate(s). Remove them now?"
+    }
+    override val cleanServersConfirmButton = "Remove All"
+    override val cleanServersNothingToast = "No dead or duplicate servers found"
+    override val cleanServersDoneToast: (Int) -> String = { n -> "Cleaned $n dead/duplicate server(s)" }
+    // Feature 5: Live Camera QR Scanner
+    override val scanQrButton = "Scan QR"
+    override val qrScannerTitle = "Scan Config or Subscription QR"
+    override val qrScannerSubtitle = "Point camera at a vless, vmess, trojan, ss, or subscription QR code"
+    override val qrCameraPermissionNeeded = "Camera permission is required to scan QR codes"
+    override val qrGrantPermissionButton = "Grant Camera Permission"
+    override val qrTorchToggleDesc = "Toggle flashlight"
+    // Feature 6: Data Usage History & Enhanced Live Logs
+    override val dataUsageSectionTitle = "Data Usage History (Daily & Monthly)"
+    override val dataUsageToday = "Today"
+    override val dataUsageWeek = "Last 7 Days"
+    override val dataUsageMonth = "Last 30 Days"
+    override val dataUsageLast7Days = "7-Day Traffic Breakdown"
+    override val dataUsageResetButton = "Reset"
+    override val logFilterAll = "All"
+    override val logFilterErrors = "Errors"
+    override val logFilterRouting = "Routing"
+    override val logFilterFailover = "Failover"
+    override val logFilterAdBlock = "AdBlock"
+    override val copyLogsButton = "Copy Logs"
+    override val logsCopiedToast = "Connection logs copied to clipboard"
 }
